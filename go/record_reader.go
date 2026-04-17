@@ -586,10 +586,11 @@ func (c *countingReadCloser) Close() error {
 }
 
 // readBatchRecords reads all Arrow records from a Snowflake batch with retries.
-// It streams directly from the network (no extra buffering) and collects
-// transformed records. If a stream fails mid-read, all partial records are
-// released and the entire batch is re-downloaded. Records are only returned
-// on full success, preventing partial results from entering channels.
+// It does not buffer the raw byte stream; instead it reads Arrow IPC messages
+// directly from the network and accumulates transformed record batches in memory.
+// If a stream fails mid-read, all partial records are released and the entire
+// batch is re-downloaded. Records are only returned on full success, preventing
+// partial results from entering channels.
 func readBatchRecords(ctx context.Context, batch batchStreamer, alloc memory.Allocator, transform recordTransformer, maxRetries int) ([]arrow.RecordBatch, error) {
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -991,7 +992,7 @@ func newRecordReader(ctx context.Context, alloc memory.Allocator, ld gosnowflake
 			case chs[0] <- rec:
 				// Successfully sent
 			case <-ctx.Done():
-				// Context  cancelled, clean up and exit
+				// Context cancelled, clean up and exit
 				rec.Release()
 				return ctx.Err()
 			}
@@ -1004,76 +1005,85 @@ func newRecordReader(ctx context.Context, alloc memory.Allocator, ld gosnowflake
 		for i := range batches[1:] {
 			batch, batchIdx := &batches[i+1], i+1
 			// Channels already initialized above, no need to create them here
-			group.Go(func() (err error) {
-				// close channels (except the last) so that Next can move on to the next channel properly
-				if batchIdx != lastChannelIndex {
-					defer close(chs[batchIdx])
-				}
+			group.Go(func(batch batchStreamer, batchIdx int) func() error {
+				return func() (err error) {
+					// close channels (except the last) so that Next can move on to the next channel properly
+					if batchIdx != lastChannelIndex {
+						defer close(chs[batchIdx])
+					}
 
-				if streamRetryEnabled {
-					recs, err := readBatchRecords(ctx, batch, alloc, recTransform, defaultStreamMaxRetries)
+					if streamRetryEnabled {
+						recs, err := readBatchRecords(ctx, batch, alloc, recTransform, defaultStreamMaxRetries)
+						if err != nil {
+							trace.SpanFromContext(ctx).AddEvent("batch.readBatchRecords.failed", trace.WithAttributes(
+								attribute.Int("batchIndex", batchIdx),
+								attribute.String("error", err.Error()),
+							))
+							return err
+						}
+						trace.SpanFromContext(ctx).AddEvent("batch.readBatchRecords.success", trace.WithAttributes(
+							attribute.Int("batchIndex", batchIdx),
+							attribute.Int("records", len(recs)),
+						))
+						for i, rec := range recs {
+							select {
+							case chs[batchIdx] <- rec:
+								recs[i] = nil // ownership transferred to channel
+							case <-ctx.Done():
+								rec.Release()
+								// Release only unsent records
+								for _, r := range recs[i+1:] {
+									if r != nil {
+										r.Release()
+									}
+								}
+								return ctx.Err()
+							}
+						}
+						return nil
+					}
+
+					// Original streaming path: read directly from stream without buffering
+					rawStream, err := batch.GetStream(ctx)
 					if err != nil {
-						trace.SpanFromContext(ctx).AddEvent("batch.readBatchRecords.failed", trace.WithAttributes(
+						trace.SpanFromContext(ctx).AddEvent("batch.GetStream.failed", trace.WithAttributes(
 							attribute.Int("batchIndex", batchIdx),
 							attribute.String("error", err.Error()),
 						))
 						return err
 					}
-					trace.SpanFromContext(ctx).AddEvent("batch.readBatchRecords.success", trace.WithAttributes(
-						attribute.Int("batchIndex", batchIdx),
-						attribute.Int("records", len(recs)),
-					))
-					for _, rec := range recs {
+					countingStream := &countingReadCloser{inner: rawStream}
+					defer func() {
+						err = errors.Join(err, countingStream.Close())
+					}()
+
+					rr, err := ipc.NewReader(countingStream, ipc.WithAllocator(alloc))
+					if err != nil {
+						trace.SpanFromContext(ctx).AddEvent("batch.ipcReader.failed", trace.WithAttributes(
+							attribute.Int("batchIndex", batchIdx),
+							attribute.Int64("bytesRead", countingStream.bytesRead),
+							attribute.String("error", err.Error()),
+						))
+						return fmt.Errorf("batch[%d]: ipc.NewReader failed after reading %d bytes: %w", batchIdx, countingStream.bytesRead, err)
+					}
+					defer rr.Release()
+
+					for rr.Next() && ctx.Err() == nil {
+						rec := rr.RecordBatch()
+						rec, err = recTransform(ctx, rec)
+						if err != nil {
+							return err
+						}
 						select {
 						case chs[batchIdx] <- rec:
 						case <-ctx.Done():
 							rec.Release()
-							for _, r := range recs {
-								if r != nil {
-									r.Release()
-								}
-							}
 							return ctx.Err()
 						}
 					}
-					return nil
+					return rr.Err()
 				}
-
-				// Original streaming path: read directly from stream without buffering
-				rawStream, err := batch.GetStream(ctx)
-				if err != nil {
-					trace.SpanFromContext(ctx).AddEvent("batch.GetStream.failed", trace.WithAttributes(
-						attribute.Int("batchIndex", batchIdx),
-						attribute.String("error", err.Error()),
-					))
-					return err
-				}
-				countingStream := &countingReadCloser{inner: rawStream}
-				defer func() {
-					err = errors.Join(err, countingStream.Close())
-				}()
-
-				rr, err := ipc.NewReader(countingStream, ipc.WithAllocator(alloc))
-				if err != nil {
-					trace.SpanFromContext(ctx).AddEvent("batch.ipcReader.failed", trace.WithAttributes(
-						attribute.Int("batchIndex", batchIdx),
-						attribute.Int64("bytesRead", countingStream.bytesRead),
-						attribute.String("error", err.Error()),
-					))
-					return fmt.Errorf("batch[%d]: ipc.NewReader failed after reading %d bytes: %w", batchIdx, countingStream.bytesRead, err)
-				}
-				defer rr.Release()
-
-				for rr.Next() && ctx.Err() == nil {
-					rec := rr.RecordBatch()
-					rec, err = recTransform(ctx, rec)
-					if err != nil {
-						return err
-					}
-					chs[batchIdx] <- rec
-				}
-				return rr.Err()
-			})
+			}(batch, batchIdx))
 		}
 
 		// place this here so that we always clean up, but they can't be in a
