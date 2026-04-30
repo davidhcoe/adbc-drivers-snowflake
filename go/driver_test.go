@@ -55,7 +55,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/google/uuid"
-	"github.com/snowflakedb/gosnowflake"
+	"github.com/snowflakedb/gosnowflake/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -115,49 +115,57 @@ func (s *SnowflakeQuirks) getSqlTypeFromArrowType(dt arrow.DataType) string {
 }
 
 func getArr(arr arrow.Array) any {
+	var (
+		v   any
+		err error
+	)
 	switch arr := arr.(type) {
 	case *array.Int8:
-		v := arr.Int8Values()
-		return gosnowflake.Array(&v)
+		val := arr.Int8Values()
+		v, err = gosnowflake.Array(&val)
 	case *array.Uint8:
-		v := arr.Uint8Values()
-		return gosnowflake.Array(&v)
+		val := arr.Uint8Values()
+		v, err = gosnowflake.Array(&val)
 	case *array.Int16:
-		v := arr.Int16Values()
-		return gosnowflake.Array(&v)
+		val := arr.Int16Values()
+		v, err = gosnowflake.Array(&val)
 	case *array.Uint16:
-		v := arr.Uint16Values()
-		return gosnowflake.Array(&v)
+		val := arr.Uint16Values()
+		v, err = gosnowflake.Array(&val)
 	case *array.Int32:
-		v := arr.Int32Values()
-		return gosnowflake.Array(&v)
+		val := arr.Int32Values()
+		v, err = gosnowflake.Array(&val)
 	case *array.Uint32:
-		v := arr.Uint32Values()
-		return gosnowflake.Array(&v)
+		val := arr.Uint32Values()
+		v, err = gosnowflake.Array(&val)
 	case *array.Int64:
-		v := arr.Int64Values()
-		return gosnowflake.Array(&v)
+		val := arr.Int64Values()
+		v, err = gosnowflake.Array(&val)
 	case *array.Uint64:
-		v := arr.Uint64Values()
-		return gosnowflake.Array(&v)
+		val := arr.Uint64Values()
+		v, err = gosnowflake.Array(&val)
 	case *array.Float32:
-		v := arr.Float32Values()
-		return gosnowflake.Array(&v)
+		val := arr.Float32Values()
+		v, err = gosnowflake.Array(&val)
 	case *array.Float64:
-		v := arr.Float64Values()
-		return gosnowflake.Array(&v)
+		val := arr.Float64Values()
+		v, err = gosnowflake.Array(&val)
 	case *array.String:
-		v := make([]string, arr.Len())
+		val := make([]string, arr.Len())
 		for i := range arr.Len() {
 			if arr.IsNull(i) {
 				continue
 			}
-			v[i] = arr.Value(i)
+			val[i] = arr.Value(i)
 		}
-		return gosnowflake.Array(&v)
+		v, err = gosnowflake.Array(&val)
 	default:
 		panic(fmt.Errorf("unimplemented type %s", arr.DataType()))
 	}
+	if err != nil {
+		panic(err)
+	}
+	return v
 }
 
 func (s *SnowflakeQuirks) CreateSampleTable(tableName string, r arrow.RecordBatch) (err error) {
@@ -390,7 +398,7 @@ func (suite *SnowflakeTests) TearDownTest() {
 }
 
 type customTransport struct {
-	base   *http.Transport
+	base   http.RoundTripper
 	called bool
 }
 
@@ -405,7 +413,7 @@ func (suite *SnowflakeTests) TestNewDatabaseWithOptions() {
 	drv := suite.Quirks.SetupDriver(t).(driver.Driver)
 
 	t.Run("WithTransporter", func(t *testing.T) {
-		transport := &customTransport{base: gosnowflake.SnowflakeTransport}
+		transport := &customTransport{base: http.DefaultTransport}
 		dbOptions := suite.Quirks.DatabaseOptions()
 		// Add trace parent to the options.
 		dbOptions[adbc.OptionKeyTelemetryTraceParent] = generateTraceparent()

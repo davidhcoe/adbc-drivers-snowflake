@@ -38,9 +38,15 @@ import (
 
 	"github.com/adbc-drivers/driverbase-go/driverbase"
 	"github.com/apache/arrow-adbc/go/adbc"
-	"github.com/snowflakedb/gosnowflake"
+	"github.com/snowflakedb/gosnowflake/v2"
+	"github.com/snowflakedb/gosnowflake/v2/arrowbatches"
 	"github.com/youmark/pkcs8"
 )
+
+// clientTelemetryEnabledParam is the Snowflake session parameter used to
+// control telemetry. gosnowflake v2 removed the DisableTelemetry config field
+// in favor of this session parameter.
+const clientTelemetryEnabledParam = "CLIENT_TELEMETRY_ENABLED"
 
 var (
 	drv         = gosnowflake.SnowflakeDriver{}
@@ -86,7 +92,6 @@ type databaseImpl struct {
 	defaultAppName        string
 }
 
-//nolint:staticcheck // ignore snowflake deprecated warnings for now
 func (d *databaseImpl) GetOption(ctx context.Context, key string) (string, error) {
 	switch key {
 	case adbc.OptionKeyUsername:
@@ -135,12 +140,14 @@ func (d *databaseImpl) GetOption(ctx context.Context, key string) (string, error
 	case OptionAuthOktaUrl:
 		return d.cfg.OktaURL.String(), nil
 	case OptionKeepSessionAlive:
-		if d.cfg.KeepSessionAlive {
+		if d.cfg.ServerSessionKeepAlive {
 			return adbc.OptionValueEnabled, nil
 		}
 		return adbc.OptionValueDisabled, nil
 	case OptionDisableTelemetry:
-		if d.cfg.DisableTelemetry {
+		// gosnowflake v2 removed the DisableTelemetry field; use the
+		// CLIENT_TELEMETRY_ENABLED session parameter instead.
+		if v, ok := d.cfg.Params[clientTelemetryEnabledParam]; ok && v != nil && strings.EqualFold(*v, "false") {
 			return adbc.OptionValueEnabled, nil
 		}
 		return adbc.OptionValueDisabled, nil
@@ -213,7 +220,6 @@ func (d *databaseImpl) SetOptions(ctx context.Context, cnOptions map[string]stri
 	// XXX(https://github.com/apache/arrow-adbc/issues/2792): Snowflake
 	// has a tendency to spam the log by default, so set the log level
 
-	//nolint:staticcheck // ignore snowflake deprecated warnings for now
 	d.cfg.Tracing = "fatal"
 
 	// set default application name to track
@@ -233,7 +239,7 @@ func (d *databaseImpl) SetOptions(ctx context.Context, cnOptions map[string]stri
 //
 // cnOptions is nil if the option is being set post-initialiation.
 //
-//nolint:staticcheck // ignore snowflake deprecated warnings for now
+
 func (d *databaseImpl) SetOptionInternal(k string, v string, cnOptions *map[string]string) error {
 	var err error
 	var ok bool
@@ -366,9 +372,9 @@ func (d *databaseImpl) SetOptionInternal(k string, v string, cnOptions *map[stri
 	case OptionKeepSessionAlive:
 		switch v {
 		case adbc.OptionValueEnabled:
-			d.cfg.KeepSessionAlive = true
+			d.cfg.ServerSessionKeepAlive = true
 		case adbc.OptionValueDisabled:
-			d.cfg.KeepSessionAlive = false
+			d.cfg.ServerSessionKeepAlive = false
 		default:
 			return adbc.Error{
 				Msg:  fmt.Sprintf("Invalid value for database option '%s': '%s'", OptionSSLSkipVerify, v),
@@ -376,11 +382,15 @@ func (d *databaseImpl) SetOptionInternal(k string, v string, cnOptions *map[stri
 			}
 		}
 	case OptionDisableTelemetry:
+		// gosnowflake v2 removed the DisableTelemetry field; configure the
+		// CLIENT_TELEMETRY_ENABLED session parameter instead.
 		switch v {
 		case adbc.OptionValueEnabled:
-			d.cfg.DisableTelemetry = true
+			val := "false"
+			d.cfg.Params[clientTelemetryEnabledParam] = &val
 		case adbc.OptionValueDisabled:
-			d.cfg.DisableTelemetry = false
+			val := "true"
+			d.cfg.Params[clientTelemetryEnabledParam] = &val
 		default:
 			return adbc.Error{
 				Msg:  fmt.Sprintf("Invalid value for database option '%s': '%s'", OptionSSLSkipVerify, v),
@@ -535,7 +545,7 @@ func (d *databaseImpl) Open(ctx context.Context) (adbcConnection adbc.Connection
 	connector := gosnowflake.NewConnector(drv, *d.cfg)
 
 	ctx = gosnowflake.WithArrowAllocator(
-		gosnowflake.WithArrowBatches(ctx), d.Alloc)
+		arrowbatches.WithArrowBatches(ctx), d.Alloc)
 
 	var cn driver.Conn
 	cn, err = connector.Connect(ctx)
