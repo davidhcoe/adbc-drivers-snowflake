@@ -203,6 +203,7 @@ func ParseSnowflakeURI(uri string) (*gosnowflake.Config, error) {
 	return gosnowflake.ParseDSN(uri)
 }
 
+//nolint:staticcheck // ignore snowflake deprecated warnings for now
 func (d *databaseImpl) SetOptions(ctx context.Context, cnOptions map[string]string) error {
 	uri, ok := cnOptions[adbc.OptionKeyURI]
 	if ok {
