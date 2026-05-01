@@ -92,6 +92,7 @@ type databaseImpl struct {
 	defaultAppName        string
 }
 
+//nolint:staticcheck // ignore snowflake deprecated warnings for now
 func (d *databaseImpl) GetOption(ctx context.Context, key string) (string, error) {
 	switch key {
 	case adbc.OptionKeyUsername:
@@ -343,7 +344,7 @@ func (d *databaseImpl) SetOptionInternal(k string, v string, cnOptions *map[stri
 			d.cfg.DisableOCSPChecks = false
 		default:
 			return adbc.Error{
-				Msg:  fmt.Sprintf("Invalid value for database option '%s': '%s'", OptionSSLSkipVerify, v),
+				Msg:  fmt.Sprintf("Invalid value for database option '%s': '%s'", k, v),
 				Code: adbc.StatusInvalidArgument,
 			}
 		}
@@ -355,7 +356,7 @@ func (d *databaseImpl) SetOptionInternal(k string, v string, cnOptions *map[stri
 			d.cfg.OCSPFailOpen = gosnowflake.OCSPFailOpenFalse
 		default:
 			return adbc.Error{
-				Msg:  fmt.Sprintf("Invalid value for database option '%s': '%s'", OptionSSLSkipVerify, v),
+				Msg:  fmt.Sprintf("Invalid value for database option '%s': '%s'", k, v),
 				Code: adbc.StatusInvalidArgument,
 			}
 		}
@@ -377,7 +378,7 @@ func (d *databaseImpl) SetOptionInternal(k string, v string, cnOptions *map[stri
 			d.cfg.ServerSessionKeepAlive = false
 		default:
 			return adbc.Error{
-				Msg:  fmt.Sprintf("Invalid value for database option '%s': '%s'", OptionSSLSkipVerify, v),
+				Msg:  fmt.Sprintf("Invalid value for database option '%s': '%s'", k, v),
 				Code: adbc.StatusInvalidArgument,
 			}
 		}
@@ -393,7 +394,7 @@ func (d *databaseImpl) SetOptionInternal(k string, v string, cnOptions *map[stri
 			d.cfg.Params[clientTelemetryEnabledParam] = &val
 		default:
 			return adbc.Error{
-				Msg:  fmt.Sprintf("Invalid value for database option '%s': '%s'", OptionSSLSkipVerify, v),
+				Msg:  fmt.Sprintf("Invalid value for database option '%s': '%s'", k, v),
 				Code: adbc.StatusInvalidArgument,
 			}
 		}
@@ -488,7 +489,7 @@ func (d *databaseImpl) SetOptionInternal(k string, v string, cnOptions *map[stri
 			d.cfg.ClientRequestMfaToken = gosnowflake.ConfigBoolFalse
 		default:
 			return adbc.Error{
-				Msg:  fmt.Sprintf("Invalid value for database option '%s': '%s'", OptionSSLSkipVerify, v),
+				Msg:  fmt.Sprintf("Invalid value for database option '%s': '%s'", k, v),
 				Code: adbc.StatusInvalidArgument,
 			}
 		}
@@ -500,7 +501,7 @@ func (d *databaseImpl) SetOptionInternal(k string, v string, cnOptions *map[stri
 			d.cfg.ClientStoreTemporaryCredential = gosnowflake.ConfigBoolFalse
 		default:
 			return adbc.Error{
-				Msg:  fmt.Sprintf("Invalid value for database option '%s': '%s'", OptionSSLSkipVerify, v),
+				Msg:  fmt.Sprintf("Invalid value for database option '%s': '%s'", k, v),
 				Code: adbc.StatusInvalidArgument,
 			}
 		}
