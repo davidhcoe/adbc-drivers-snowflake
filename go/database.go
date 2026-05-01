@@ -239,7 +239,7 @@ func (d *databaseImpl) SetOptions(ctx context.Context, cnOptions map[string]stri
 //
 // cnOptions is nil if the option is being set post-initialiation.
 //
-
+//nolint:staticcheck // ignore snowflake deprecated warnings for now
 func (d *databaseImpl) SetOptionInternal(k string, v string, cnOptions *map[string]string) error {
 	var err error
 	var ok bool
