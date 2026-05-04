@@ -98,15 +98,6 @@ const (
 	// is shared to discover the schema. When disabled, all batches use the
 	// original inline streaming path. Default is disabled.
 	OptionStreamRetryEnabled = "adbc.snowflake.sql.client_option.stream_retry_enabled"
-	// OptionAutodetectJSONBatches controls whether the driver automatically
-	// detects when Snowflake returns JSON-formatted data in downloadable
-	// chunks (instead of Arrow IPC) and parses them accordingly. Some
-	// queries such as stored procedure calls may return JSON chunks even
-	// when Arrow format was requested. When enabled, the driver peeks at
-	// the first bytes of the stream to detect the format and routes JSON
-	// data through the appropriate parser. When disabled, all batches are
-	// assumed to be Arrow IPC (the original behavior). Default is disabled.
-	OptionAutodetectJSONBatches = "adbc.snowflake.sql.client_option.autodetect_json_batches"
 
 	OptionApplicationName  = "adbc.snowflake.sql.client_option.app_name"
 	OptionSSLSkipVerify    = "adbc.snowflake.sql.client_option.tls_skip_verify"
@@ -305,7 +296,6 @@ func (d *driverImpl) NewDatabaseWithOptionsContext(
 		DatabaseImplBase:      dbBase,
 		useHighPrecision:      true,
 		streamRetryEnabled:    false,
-		autodetectJSONBatches: false,
 		defaultAppName:        defaultAppName,
 		maxTimestampPrecision: Nanoseconds,
 	}

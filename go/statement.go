@@ -61,7 +61,6 @@ type statement struct {
 	prefetchConcurrency   int
 	useHighPrecision      bool
 	streamRetryEnabled    bool
-	autodetectJSONBatches bool
 	maxTimestampPrecision MaxTimestampPrecision
 
 	query          string
@@ -261,18 +260,6 @@ func (st *statement) SetOption(ctx context.Context, key string, val string) erro
 			st.streamRetryEnabled = true
 		case adbc.OptionValueDisabled:
 			st.streamRetryEnabled = false
-		default:
-			return adbc.Error{
-				Msg:  fmt.Sprintf("[Snowflake] invalid statement option %s=%s", key, val),
-				Code: adbc.StatusInvalidArgument,
-			}
-		}
-	case OptionAutodetectJSONBatches:
-		switch val {
-		case adbc.OptionValueEnabled:
-			st.autodetectJSONBatches = true
-		case adbc.OptionValueDisabled:
-			st.autodetectJSONBatches = false
 		default:
 			return adbc.Error{
 				Msg:  fmt.Sprintf("[Snowflake] invalid statement option %s=%s", key, val),
@@ -574,7 +561,7 @@ func (st *statement) ExecuteQuery(ctx context.Context) (reader array.RecordReade
 					return nil, err
 				}
 
-				reader, err = newRecordReader(ctx, st.alloc, loader, st.queueSize, st.prefetchConcurrency, st.useHighPrecision, st.streamRetryEnabled, st.autodetectJSONBatches, st.maxTimestampPrecision)
+				reader, err = newRecordReader(ctx, st.alloc, loader, st.queueSize, st.prefetchConcurrency, st.useHighPrecision, st.streamRetryEnabled, st.maxTimestampPrecision)
 				return reader, err
 			},
 			currentBatch: st.bound,
@@ -599,7 +586,7 @@ func (st *statement) ExecuteQuery(ctx context.Context) (reader array.RecordReade
 		return
 	}
 
-	reader, err = newRecordReader(ctx, st.alloc, loader, st.queueSize, st.prefetchConcurrency, st.useHighPrecision, st.streamRetryEnabled, st.autodetectJSONBatches, st.maxTimestampPrecision)
+	reader, err = newRecordReader(ctx, st.alloc, loader, st.queueSize, st.prefetchConcurrency, st.useHighPrecision, st.streamRetryEnabled, st.maxTimestampPrecision)
 	nRows = loader.TotalRows()
 	return
 }

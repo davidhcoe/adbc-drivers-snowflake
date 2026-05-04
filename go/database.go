@@ -89,7 +89,6 @@ type databaseImpl struct {
 
 	useHighPrecision      bool
 	streamRetryEnabled    bool
-	autodetectJSONBatches bool
 	maxTimestampPrecision MaxTimestampPrecision
 	defaultAppName        string
 }
@@ -175,11 +174,6 @@ func (d *databaseImpl) GetOption(ctx context.Context, key string) (string, error
 		return adbc.OptionValueDisabled, nil
 	case OptionStreamRetryEnabled:
 		if d.streamRetryEnabled {
-			return adbc.OptionValueEnabled, nil
-		}
-		return adbc.OptionValueDisabled, nil
-	case OptionAutodetectJSONBatches:
-		if d.autodetectJSONBatches {
 			return adbc.OptionValueEnabled, nil
 		}
 		return adbc.OptionValueDisabled, nil
@@ -546,18 +540,6 @@ func (d *databaseImpl) SetOptionInternal(k string, v string, cnOptions *map[stri
 				Code: adbc.StatusInvalidArgument,
 			}
 		}
-	case OptionAutodetectJSONBatches:
-		switch v {
-		case adbc.OptionValueEnabled:
-			d.autodetectJSONBatches = true
-		case adbc.OptionValueDisabled:
-			d.autodetectJSONBatches = false
-		default:
-			return adbc.Error{
-				Msg:  fmt.Sprintf("Invalid value for database option '%s': '%s'", OptionAutodetectJSONBatches, v),
-				Code: adbc.StatusInvalidArgument,
-			}
-		}
 	case OptionMaxTimestampPrecision:
 		switch v {
 		case OptionValueNanoseconds, OptionValueNanosecondsNoOverflow, OptionValueMicroseconds:
@@ -600,7 +582,6 @@ func (d *databaseImpl) Open(ctx context.Context) (adbcConnection adbc.Connection
 		// get Int64/Float64 instead
 		useHighPrecision:      d.useHighPrecision,
 		streamRetryEnabled:    d.streamRetryEnabled,
-		autodetectJSONBatches: d.autodetectJSONBatches,
 		maxTimestampPrecision: d.maxTimestampPrecision,
 		ConnectionImplBase:    driverbase.NewConnectionImplBase(&d.DatabaseImplBase),
 	}

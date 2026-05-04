@@ -2431,34 +2431,6 @@ func (suite *SnowflakeTests) TestMetadataOnlyQuery() {
 	suite.Equal(n, recv)
 }
 
-func (suite *SnowflakeTests) TestMetadataOnlyQueryAutodetectJSON() {
-	// Same scenario as TestMetadataOnlyQuery but toggling autodetect_json_batches.
-	// The metadata query goes through the inline JSONData() path (not downloadable
-	// chunks), so it should succeed regardless of the autodetect setting.
-
-	suite.Require().NoError(suite.stmt.SetSqlQuery(`ALTER SESSION SET CLIENT_RESULT_CHUNK_SIZE = 50`))
-	_, err := suite.stmt.ExecuteUpdate(suite.ctx)
-	suite.Require().NoError(err)
-
-	for _, enabled := range []string{adbc.OptionValueEnabled, adbc.OptionValueDisabled} {
-		suite.Run("autodetect_json_"+enabled, func() {
-			suite.Require().NoError(suite.stmt.SetOption(driver.OptionAutodetectJSONBatches, enabled))
-			suite.Require().NoError(suite.stmt.SetSqlQuery(`SHOW FUNCTIONS`))
-			rdr, n, err := suite.stmt.ExecuteQuery(suite.ctx)
-			suite.Require().NoError(err, "ExecuteQuery failed with autodetect_json=%s", enabled)
-			defer rdr.Release()
-
-			recv := int64(0)
-			for rdr.Next() {
-				recv += rdr.RecordBatch().NumRows()
-			}
-			suite.Require().NoError(rdr.Err())
-			suite.Equal(n, recv, "row count mismatch with autodetect_json=%s", enabled)
-			suite.Greater(recv, int64(0), "expected rows from SHOW FUNCTIONS")
-		})
-	}
-}
-
 func (suite *SnowflakeTests) TestEmptyResultSet() {
 	// regression test for apache/arrow-adbc#1804
 	// this would previously crash
@@ -2909,8 +2881,8 @@ func (suite *SnowflakeTests) TestGetObjectsVector() {
 func (suite *SnowflakeTests) TestCallStoredProcedureStreamRetry() {
 	// Test calling a stored procedure that returns a result set via JSON chunks,
 	// exercising both the stream-retry and non-retry batch reading paths.
-	// autodetectJSONBatches must be enabled because stored procedures return
-	// JSON-formatted chunks instead of Arrow IPC.
+	// JSON-formatted chunks are detected automatically via the gosnowflake
+	// QueryResultFormatProvider interface.
 
 	// Create a temporary stored procedure that generates enough rows to produce
 	// multiple downloadable JSON chunks.
@@ -2928,7 +2900,7 @@ func (suite *SnowflakeTests) TestCallStoredProcedureStreamRetry() {
 		END;
 		$$`, suite.Quirks.catalogName, suite.Quirks.schemaName)
 
-	suite.Require().NoError(suite.stmt.SetSqlQuery(createProc))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, createProc))
 	_, err := suite.stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
 
@@ -2936,9 +2908,8 @@ func (suite *SnowflakeTests) TestCallStoredProcedureStreamRetry() {
 
 	for _, enabled := range []string{adbc.OptionValueEnabled, adbc.OptionValueDisabled} {
 		suite.Run("stream_retry_"+enabled, func() {
-			suite.Require().NoError(suite.stmt.SetOption(driver.OptionStreamRetryEnabled, enabled))
-			suite.Require().NoError(suite.stmt.SetOption(driver.OptionAutodetectJSONBatches, adbc.OptionValueEnabled))
-			suite.Require().NoError(suite.stmt.SetSqlQuery(callSQL))
+			suite.Require().NoError(suite.stmt.SetOption(suite.ctx, driver.OptionStreamRetryEnabled, enabled))
+			suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, callSQL))
 
 			rdr, _, err := suite.stmt.ExecuteQuery(suite.ctx)
 			suite.Require().NoError(err, "ExecuteQuery failed with stream_retry=%s", enabled)

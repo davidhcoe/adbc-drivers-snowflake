@@ -752,7 +752,7 @@ func readJSONBatches(ctx context.Context, alloc memory.Allocator, ld gosnowflake
 	return array.NewRecordReader(schema, results)
 }
 
-func newRecordReader(ctx context.Context, alloc memory.Allocator, ld gosnowflake.ArrowStreamLoader, bufferSize, prefetchConcurrency int, useHighPrecision, streamRetryEnabled, autodetectJSONBatches bool, maxTimestampPrecision MaxTimestampPrecision) (array.RecordReader, error) {
+func newRecordReader(ctx context.Context, alloc memory.Allocator, ld gosnowflake.ArrowStreamLoader, bufferSize, prefetchConcurrency int, useHighPrecision, streamRetryEnabled bool, maxTimestampPrecision MaxTimestampPrecision) (array.RecordReader, error) {
 	batches, err := ld.GetBatches()
 	if err != nil {
 		return nil, errToAdbcErr(adbc.StatusInternal, err)
@@ -882,52 +882,25 @@ func newRecordReader(ctx context.Context, alloc memory.Allocator, ld gosnowflake
 		attribute.Int("jsonDataLen", len(ld.JSONData())),
 	))
 
-	// When autodetectJSONBatches is enabled, peek at batch[0] to detect
-	// whether the data is Arrow IPC or JSON. Some Snowflake queries (e.g.
-	// stored procedures) return JSON-formatted chunks via GetBatches() even
-	// when Arrow was requested, with JSONData() empty because no inline data
-	// was included in the initial response.
 	raw0, err := batches[0].GetStream(ctx)
 	if err != nil {
 		return nil, errToAdbcErr(adbc.StatusIO, err)
 	}
 
-	if autodetectJSONBatches {
-		var peekBuf [4]byte
-		n, peekErr := io.ReadFull(raw0, peekBuf[:])
-		if peekErr != nil && peekErr != io.ErrUnexpectedEOF {
-			_ = raw0.Close()
-			return nil, errToAdbcErr(adbc.StatusIO, fmt.Errorf("failed to peek at batch[0] stream: %w", peekErr))
+	// Use the QueryResultFormatProvider interface (added in gosnowflake 2.0.2)
+	// to detect when the server returned JSON-formatted chunks instead of
+	// Arrow IPC. Some statements such as `CALL stored_procedure() RETURNS
+	// TABLE(...)` always come back as JSON regardless of the Arrow request.
+	if fp, ok := ld.(gosnowflake.QueryResultFormatProvider); ok && fp.QueryResultFormat() == "json" {
+		raw0Data, err := io.ReadAll(raw0)
+		_ = raw0.Close()
+		if err != nil {
+			return nil, errToAdbcErr(adbc.StatusIO, fmt.Errorf("batch[0]: ReadAll failed: %w", err))
 		}
-
-		// Arrow IPC streams start with a continuation token: 0xFFFFFFFF.
-		// If the first bytes don't match, the stream is likely JSON data.
-		isArrowIPC := n >= 4 && peekBuf[0] == 0xFF && peekBuf[1] == 0xFF && peekBuf[2] == 0xFF && peekBuf[3] == 0xFF
-		trace.SpanFromContext(ctx).AddEvent("newRecordReader.peek", trace.WithAttributes(
-			attribute.Int("peekBytes", n),
-			attribute.String("peekHex", fmt.Sprintf("%x", peekBuf[:n])),
-			attribute.Bool("isArrowIPC", isArrowIPC),
+		trace.SpanFromContext(ctx).AddEvent("newRecordReader.jsonFormat", trace.WithAttributes(
+			attribute.Int("batch0Bytes", len(raw0Data)),
 		))
-
-		if !isArrowIPC {
-			// The batches contain JSON, not Arrow IPC. Read the rest of batch[0]
-			// (we already peeked bytes from raw0) and process all batches
-			// through the JSON conversion path.
-			restOfBatch0, err := io.ReadAll(raw0)
-			_ = raw0.Close()
-			if err != nil {
-				return nil, errToAdbcErr(adbc.StatusIO, fmt.Errorf("batch[0]: ReadAll failed: %w", err))
-			}
-			batch0Data := append(peekBuf[:n], restOfBatch0...)
-			return readJSONBatches(ctx, alloc, ld, batches, batch0Data, maxTimestampPrecision, useHighPrecision)
-		}
-
-		// It is Arrow IPC — re-assemble the stream with the peeked bytes prepended
-		combinedReader := io.MultiReader(bytes.NewReader(peekBuf[:n]), raw0)
-		raw0 = struct {
-			io.Reader
-			io.Closer
-		}{combinedReader, raw0}
+		return readJSONBatches(ctx, alloc, ld, batches, raw0Data, maxTimestampPrecision, useHighPrecision)
 	}
 
 	r := &countingReadCloser{inner: raw0}
