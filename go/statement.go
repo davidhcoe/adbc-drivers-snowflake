@@ -35,7 +35,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
-	"github.com/snowflakedb/gosnowflake"
+	"github.com/snowflakedb/gosnowflake/v2"
 	semconv "go.opentelemetry.io/otel/semconv/v1.30.0"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -85,12 +85,12 @@ func (st *statement) Base() *driverbase.StatementImplBase {
 func (st *statement) qualifiedTableName() string {
 	parts := make([]string, 0, 3)
 	if st.targetCatalog != "" {
-		parts = append(parts, quoteTblName(st.targetCatalog))
+		parts = append(parts, quoteIdentifier(st.targetCatalog))
 	}
 	if st.targetDbSchema != "" {
-		parts = append(parts, quoteTblName(st.targetDbSchema))
+		parts = append(parts, quoteIdentifier(st.targetDbSchema))
 	}
-	parts = append(parts, quoteTblName(st.targetTable))
+	parts = append(parts, quoteIdentifier(st.targetTable))
 	return strings.Join(parts, ".")
 }
 
@@ -106,8 +106,8 @@ func (st *statement) setQueryContext(ctx context.Context) context.Context {
 // and closes it (particularly if it is a prepared statement).
 //
 // A statement instance should not be used after Close is called.
-func (st *statement) Close() (err error) {
-	_, span := driverbase.StartSpan(context.Background(), "statement.Close", st)
+func (st *statement) Close(ctx context.Context) (err error) {
+	_, span := driverbase.StartSpan(ctx, "statement.Close", st)
 	defer driverbase.EndSpan(span, err)
 
 	if st.cnxn == nil {
@@ -128,22 +128,22 @@ func (st *statement) Close() (err error) {
 	return err
 }
 
-func (st *statement) GetOption(key string) (string, error) {
+func (st *statement) GetOption(ctx context.Context, key string) (string, error) {
 	switch key {
 	case OptionStatementQueryTag:
 		return st.queryTag, nil
 	default:
-		return st.Base().GetOption(key)
+		return st.Base().GetOption(ctx, key)
 	}
 }
 
-func (st *statement) GetOptionBytes(key string) ([]byte, error) {
+func (st *statement) GetOptionBytes(ctx context.Context, key string) ([]byte, error) {
 	return nil, adbc.Error{
 		Msg:  fmt.Sprintf("[Snowflake] Unknown statement option '%s'", key),
 		Code: adbc.StatusNotFound,
 	}
 }
-func (st *statement) GetOptionInt(key string) (int64, error) {
+func (st *statement) GetOptionInt(ctx context.Context, key string) (int64, error) {
 	switch key {
 	case OptionStatementQueueSize:
 		return int64(st.queueSize), nil
@@ -153,7 +153,7 @@ func (st *statement) GetOptionInt(key string) (int64, error) {
 		Code: adbc.StatusNotFound,
 	}
 }
-func (st *statement) GetOptionDouble(key string) (float64, error) {
+func (st *statement) GetOptionDouble(ctx context.Context, key string) (float64, error) {
 	return 0, adbc.Error{
 		Msg:  fmt.Sprintf("[Snowflake] Unknown statement option '%s'", key),
 		Code: adbc.StatusNotFound,
@@ -161,7 +161,7 @@ func (st *statement) GetOptionDouble(key string) (float64, error) {
 }
 
 // SetOption sets a string option on this statement
-func (st *statement) SetOption(key string, val string) error {
+func (st *statement) SetOption(ctx context.Context, key string, val string) error {
 	switch key {
 	case adbc.OptionKeyIngestTargetTable:
 		st.query = ""
@@ -194,7 +194,7 @@ func (st *statement) SetOption(key string, val string) error {
 				Code: adbc.StatusInvalidArgument,
 			}
 		}
-		return st.SetOptionInt(key, int64(sz))
+		return st.SetOptionInt(ctx, key, int64(sz))
 	case OptionStatementPrefetchConcurrency:
 		concurrency, err := strconv.Atoi(val)
 		if err != nil {
@@ -203,7 +203,7 @@ func (st *statement) SetOption(key string, val string) error {
 				Code: adbc.StatusInvalidArgument,
 			}
 		}
-		return st.SetOptionInt(key, int64(concurrency))
+		return st.SetOptionInt(ctx, key, int64(concurrency))
 	case OptionStatementIngestWriterConcurrency:
 		concurrency, err := strconv.Atoi(val)
 		if err != nil {
@@ -212,7 +212,7 @@ func (st *statement) SetOption(key string, val string) error {
 				Code: adbc.StatusInvalidArgument,
 			}
 		}
-		return st.SetOptionInt(key, int64(concurrency))
+		return st.SetOptionInt(ctx, key, int64(concurrency))
 	case OptionStatementIngestUploadConcurrency:
 		concurrency, err := strconv.Atoi(val)
 		if err != nil {
@@ -221,7 +221,7 @@ func (st *statement) SetOption(key string, val string) error {
 				Code: adbc.StatusInvalidArgument,
 			}
 		}
-		return st.SetOptionInt(key, int64(concurrency))
+		return st.SetOptionInt(ctx, key, int64(concurrency))
 	case OptionStatementIngestCopyConcurrency:
 		concurrency, err := strconv.Atoi(val)
 		if err != nil {
@@ -230,7 +230,7 @@ func (st *statement) SetOption(key string, val string) error {
 				Code: adbc.StatusInvalidArgument,
 			}
 		}
-		return st.SetOptionInt(key, int64(concurrency))
+		return st.SetOptionInt(ctx, key, int64(concurrency))
 	case OptionStatementIngestTargetFileSize:
 		size, err := strconv.Atoi(val)
 		if err != nil {
@@ -239,7 +239,7 @@ func (st *statement) SetOption(key string, val string) error {
 				Code: adbc.StatusInvalidArgument,
 			}
 		}
-		return st.SetOptionInt(key, int64(size))
+		return st.SetOptionInt(ctx, key, int64(size))
 	case OptionStatementQueryTag:
 		st.queryTag = val
 		return nil
@@ -290,19 +290,19 @@ func (st *statement) SetOption(key string, val string) error {
 		st.ingestOptions.vectorizedScanner = vectorized
 		return nil
 	default:
-		return st.Base().SetOption(key, val)
+		return st.Base().SetOption(ctx, key, val)
 	}
 	return nil
 }
 
-func (st *statement) SetOptionBytes(key string, value []byte) error {
+func (st *statement) SetOptionBytes(ctx context.Context, key string, value []byte) error {
 	return adbc.Error{
 		Msg:  fmt.Sprintf("[Snowflake] Unknown statement option '%s'", key),
 		Code: adbc.StatusNotImplemented,
 	}
 }
 
-func (st *statement) SetOptionInt(key string, value int64) error {
+func (st *statement) SetOptionInt(ctx context.Context, key string, value int64) error {
 	switch key {
 	case OptionStatementQueueSize:
 		if value <= 0 {
@@ -375,7 +375,7 @@ func (st *statement) SetOptionInt(key string, value int64) error {
 	}
 }
 
-func (st *statement) SetOptionDouble(key string, value float64) error {
+func (st *statement) SetOptionDouble(ctx context.Context, key string, value float64) error {
 	return adbc.Error{
 		Msg:  fmt.Sprintf("[Snowflake] Unknown statement option '%s'", key),
 		Code: adbc.StatusNotImplemented,
@@ -387,7 +387,7 @@ func (st *statement) SetOptionDouble(key string, value float64) error {
 // The query can then be executed with any of the Execute methods.
 // For queries expected to be executed repeatedly, Prepare should be
 // called before execution.
-func (st *statement) SetSqlQuery(query string) error {
+func (st *statement) SetSqlQuery(ctx context.Context, query string) error {
 	st.query = query
 	st.targetTable = ""
 	return nil
@@ -466,7 +466,7 @@ func (st *statement) initIngest(ctx context.Context) error {
 			createBldr.WriteString(", ")
 		}
 
-		createBldr.WriteString(quoteTblName(f.Name))
+		createBldr.WriteString(quoteIdentifier(f.Name))
 		createBldr.WriteString(" ")
 		ty := toSnowflakeType(f.Type)
 		if ty == "" {
@@ -744,7 +744,7 @@ func (st *statement) Prepare(_ context.Context) error {
 // Like SetSqlQuery, after this is called the query can be executed
 // using any of the Execute methods. If the query is expected to be
 // executed repeatedly, Prepare should be called first on the statement.
-func (st *statement) SetSubstraitPlan(plan []byte) error {
+func (st *statement) SetSubstraitPlan(ctx context.Context, plan []byte) error {
 	return adbc.Error{
 		Msg:  "Snowflake does not support Substrait plans",
 		Code: adbc.StatusNotImplemented,
@@ -811,7 +811,7 @@ func (st *statement) BindStream(_ context.Context, stream array.RecordReader) er
 //
 // This should return an error with StatusNotImplemented if the schema
 // cannot be determined.
-func (st *statement) GetParameterSchema() (*arrow.Schema, error) {
+func (st *statement) GetParameterSchema(ctx context.Context) (*arrow.Schema, error) {
 	// snowflake's API does not provide any way to determine the schema
 	return nil, adbc.Error{
 		Code: adbc.StatusNotImplemented,

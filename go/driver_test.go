@@ -46,19 +46,27 @@ import (
 	"time"
 
 	"github.com/adbc-drivers/driverbase-go/driverbase"
+	"github.com/adbc-drivers/driverbase-go/testutil"
+	"github.com/adbc-drivers/driverbase-go/validation"
 	driver "github.com/adbc-drivers/snowflake/go"
 	"github.com/apache/arrow-adbc/go/adbc"
-	"github.com/apache/arrow-adbc/go/adbc/validation"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/google/uuid"
-	"github.com/snowflakedb/gosnowflake"
+	"github.com/snowflakedb/gosnowflake/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
+
+// quoteIdentifier quotes a Snowflake identifier to handle special characters and preserve case.
+// This is used for table names, schema names, catalog names, and column names.
+func quoteIdentifier(identifier string) string {
+	escaped := strings.ReplaceAll(identifier, `"`, `""`)
+	return fmt.Sprintf(`"%s"`, escaped)
+}
 
 type SnowflakeQuirks struct {
 	dsn         string
@@ -68,7 +76,7 @@ type SnowflakeQuirks struct {
 	schemaName  string
 }
 
-func (s *SnowflakeQuirks) SetupDriver(t *testing.T) adbc.Driver {
+func (s *SnowflakeQuirks) SetupDriver(t *testing.T) driverbase.DriverWithContext {
 	s.mem = memory.NewCheckedAllocator(memory.DefaultAllocator)
 	cfg, err := gosnowflake.ParseDSN(s.dsn)
 	require.NoError(t, err)
@@ -78,7 +86,7 @@ func (s *SnowflakeQuirks) SetupDriver(t *testing.T) adbc.Driver {
 	return driver.NewDriver(s.mem)
 }
 
-func (s *SnowflakeQuirks) TearDownDriver(t *testing.T, _ adbc.Driver) {
+func (s *SnowflakeQuirks) TearDownDriver(t *testing.T, _ driverbase.DriverWithContext) {
 	s.mem.AssertSize(t, 0)
 }
 
@@ -107,59 +115,63 @@ func (s *SnowflakeQuirks) getSqlTypeFromArrowType(dt arrow.DataType) string {
 }
 
 func getArr(arr arrow.Array) any {
+	var (
+		v   any
+		err error
+	)
 	switch arr := arr.(type) {
 	case *array.Int8:
-		v := arr.Int8Values()
-		return gosnowflake.Array(&v)
+		val := arr.Int8Values()
+		v, err = gosnowflake.Array(&val)
 	case *array.Uint8:
-		v := arr.Uint8Values()
-		return gosnowflake.Array(&v)
+		val := arr.Uint8Values()
+		v, err = gosnowflake.Array(&val)
 	case *array.Int16:
-		v := arr.Int16Values()
-		return gosnowflake.Array(&v)
+		val := arr.Int16Values()
+		v, err = gosnowflake.Array(&val)
 	case *array.Uint16:
-		v := arr.Uint16Values()
-		return gosnowflake.Array(&v)
+		val := arr.Uint16Values()
+		v, err = gosnowflake.Array(&val)
 	case *array.Int32:
-		v := arr.Int32Values()
-		return gosnowflake.Array(&v)
+		val := arr.Int32Values()
+		v, err = gosnowflake.Array(&val)
 	case *array.Uint32:
-		v := arr.Uint32Values()
-		return gosnowflake.Array(&v)
+		val := arr.Uint32Values()
+		v, err = gosnowflake.Array(&val)
 	case *array.Int64:
-		v := arr.Int64Values()
-		return gosnowflake.Array(&v)
+		val := arr.Int64Values()
+		v, err = gosnowflake.Array(&val)
 	case *array.Uint64:
-		v := arr.Uint64Values()
-		return gosnowflake.Array(&v)
+		val := arr.Uint64Values()
+		v, err = gosnowflake.Array(&val)
 	case *array.Float32:
-		v := arr.Float32Values()
-		return gosnowflake.Array(&v)
+		val := arr.Float32Values()
+		v, err = gosnowflake.Array(&val)
 	case *array.Float64:
-		v := arr.Float64Values()
-		return gosnowflake.Array(&v)
+		val := arr.Float64Values()
+		v, err = gosnowflake.Array(&val)
 	case *array.String:
-		v := make([]string, arr.Len())
+		val := make([]string, arr.Len())
 		for i := range arr.Len() {
 			if arr.IsNull(i) {
 				continue
 			}
-			v[i] = arr.Value(i)
+			val[i] = arr.Value(i)
 		}
-		return gosnowflake.Array(&v)
+		v, err = gosnowflake.Array(&val)
 	default:
 		panic(fmt.Errorf("unimplemented type %s", arr.DataType()))
 	}
-}
-
-func quoteTblName(name string) string {
-	return "\"" + strings.ReplaceAll(name, "\"", "\"\"") + "\""
+	if err != nil {
+		panic(err)
+	}
+	return v
 }
 
 func (s *SnowflakeQuirks) CreateSampleTable(tableName string, r arrow.RecordBatch) (err error) {
 	var b strings.Builder
 	b.WriteString("CREATE OR REPLACE TABLE ")
-	b.WriteString(quoteTblName(tableName))
+	b.WriteString(quoteIdentifier(tableName))
 	b.WriteString(" (")
 
 	for i := range r.NumCols() {
@@ -182,7 +194,7 @@ func (s *SnowflakeQuirks) CreateSampleTable(tableName string, r arrow.RecordBatc
 		return err
 	}
 
-	insertQuery := "INSERT INTO " + quoteTblName(tableName) + " VALUES ("
+	insertQuery := "INSERT INTO " + quoteIdentifier(tableName) + " VALUES ("
 	bindings := strings.Repeat("?,", int(r.NumCols()))
 	insertQuery += bindings[:len(bindings)-1] + ")"
 
@@ -195,22 +207,23 @@ func (s *SnowflakeQuirks) CreateSampleTable(tableName string, r arrow.RecordBatc
 	return err
 }
 
-func (s *SnowflakeQuirks) DropTable(cnxn adbc.Connection, tblname string) error {
-	stmt, err := cnxn.NewStatement()
+func (s *SnowflakeQuirks) DropTable(cnxn adbc.ConnectionWithContext, tblname string) error {
+	ctx := context.Background()
+	stmt, err := cnxn.NewStatement(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		if err = stmt.Close(); err != nil {
+		if err = stmt.Close(ctx); err != nil {
 			panic(err)
 		}
 	}()
 
-	if err = stmt.SetSqlQuery(`DROP TABLE IF EXISTS ` + quoteTblName(tblname)); err != nil {
+	if err = stmt.SetSqlQuery(ctx, `DROP TABLE IF EXISTS `+quoteIdentifier(tblname)); err != nil {
 		return err
 	}
 
-	_, err = stmt.ExecuteUpdate(context.Background())
+	_, err = stmt.ExecuteUpdate(ctx)
 	return err
 }
 
@@ -222,7 +235,7 @@ func (s *SnowflakeQuirks) SupportsCurrentCatalogSchema() bool          { return 
 func (s *SnowflakeQuirks) SupportsExecuteSchema() bool                 { return true }
 func (s *SnowflakeQuirks) SupportsGetSetOptions() bool                 { return true }
 func (s *SnowflakeQuirks) SupportsPartitionedData() bool               { return false }
-func (s *SnowflakeQuirks) SupportsStatistics() bool                    { return false }
+func (s *SnowflakeQuirks) SupportsStatistics() bool                    { return true }
 func (s *SnowflakeQuirks) SupportsTransactions() bool                  { return true }
 func (s *SnowflakeQuirks) SupportsGetParameterSchema() bool            { return false }
 func (s *SnowflakeQuirks) SupportsDynamicParameterBinding() bool       { return false }
@@ -356,36 +369,36 @@ type SnowflakeTests struct {
 	Quirks *SnowflakeQuirks
 
 	ctx    context.Context
-	driver adbc.Driver
-	db     adbc.Database
-	cnxn   adbc.Connection
-	stmt   adbc.Statement
+	driver driverbase.DriverWithContext
+	db     adbc.DatabaseWithContext
+	cnxn   adbc.ConnectionWithContext
+	stmt   adbc.StatementWithContext
 }
 
 func (suite *SnowflakeTests) SetupTest() {
 	var err error
 	suite.ctx = context.Background()
 	suite.driver = suite.Quirks.SetupDriver(suite.T())
-	suite.db, err = suite.driver.NewDatabase(suite.Quirks.DatabaseOptions())
+	suite.db, err = suite.driver.NewDatabaseWithContext(suite.ctx, suite.Quirks.DatabaseOptions())
 	suite.NoError(err)
 	suite.cnxn, err = suite.db.Open(suite.ctx)
 	suite.NoError(err)
-	suite.stmt, err = suite.cnxn.NewStatement()
+	suite.stmt, err = suite.cnxn.NewStatement(suite.ctx)
 	suite.NoError(err)
 }
 
 func (suite *SnowflakeTests) TearDownTest() {
-	suite.NoError(suite.stmt.Close())
-	suite.NoError(suite.cnxn.Close())
+	suite.NoError(suite.stmt.Close(suite.ctx))
+	suite.NoError(suite.cnxn.Close(suite.ctx))
 	suite.Quirks.TearDownDriver(suite.T(), suite.driver)
 	suite.cnxn = nil
-	suite.NoError(suite.db.Close())
+	suite.NoError(suite.db.Close(suite.ctx))
 	suite.db = nil
 	suite.driver = nil
 }
 
 type customTransport struct {
-	base   *http.Transport
+	base   http.RoundTripper
 	called bool
 }
 
@@ -400,7 +413,7 @@ func (suite *SnowflakeTests) TestNewDatabaseWithOptions() {
 	drv := suite.Quirks.SetupDriver(t).(driver.Driver)
 
 	t.Run("WithTransporter", func(t *testing.T) {
-		transport := &customTransport{base: gosnowflake.SnowflakeTransport}
+		transport := &customTransport{base: http.DefaultTransport}
 		dbOptions := suite.Quirks.DatabaseOptions()
 		// Add trace parent to the options.
 		dbOptions[adbc.OptionKeyTelemetryTraceParent] = generateTraceparent()
@@ -422,8 +435,8 @@ func (suite *SnowflakeTests) TestNewDatabaseWithOptions() {
 		suite.NotEmpty(t, cTp)
 		suite.Equal(dTp, cTp, "expecting database and connection trace parent to be equal")
 
-		suite.NoError(db.Close())
-		suite.NoError(cnxn.Close())
+		suite.NoError(db.Close(suite.ctx))
+		suite.NoError(cnxn.Close(suite.ctx))
 		suite.True(transport.called)
 	})
 }
@@ -432,7 +445,7 @@ func (suite *SnowflakeTests) TestSqlIngestTimestamp() {
 	suite.Require().NoError(suite.Quirks.DropTable(suite.cnxn, "bulk_ingest"))
 
 	sessionTimezone := "UTC"
-	suite.Require().NoError(suite.stmt.SetSqlQuery(fmt.Sprintf(`ALTER SESSION SET TIMEZONE = "%s"`, sessionTimezone)))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, fmt.Sprintf(`ALTER SESSION SET TIMEZONE = "%s"`, sessionTimezone)))
 	_, err := suite.stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
 
@@ -462,12 +475,12 @@ func (suite *SnowflakeTests) TestSqlIngestTimestamp() {
 	defer rec.Release()
 
 	suite.Require().NoError(suite.stmt.Bind(suite.ctx, rec))
-	suite.Require().NoError(suite.stmt.SetOption(adbc.OptionKeyIngestTargetTable, "bulk_ingest"))
+	suite.Require().NoError(suite.stmt.SetOption(suite.ctx, adbc.OptionKeyIngestTargetTable, "bulk_ingest"))
 	n, err := suite.stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
 	suite.EqualValues(3, n)
 
-	suite.Require().NoError(suite.stmt.SetSqlQuery(`SELECT * FROM "bulk_ingest" ORDER BY "col" ASC NULLS FIRST`))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `SELECT * FROM "bulk_ingest" ORDER BY "col" ASC NULLS FIRST`))
 	rdr, n, err := suite.stmt.ExecuteQuery(suite.ctx)
 	suite.Require().NoError(err)
 	defer rdr.Release()
@@ -565,12 +578,12 @@ func (suite *SnowflakeTests) TestSqlIngestRecordAndStreamAreEquivalent() {
 	defer stream.Release()
 
 	suite.Require().NoError(suite.stmt.Bind(suite.ctx, rec))
-	suite.Require().NoError(suite.stmt.SetOption(adbc.OptionKeyIngestTargetTable, "bulk_ingest_bind"))
+	suite.Require().NoError(suite.stmt.SetOption(suite.ctx, adbc.OptionKeyIngestTargetTable, "bulk_ingest_bind"))
 	n, err := suite.stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
 	suite.EqualValues(3, n)
 
-	suite.Require().NoError(suite.stmt.SetSqlQuery(`SELECT * FROM "bulk_ingest_bind" ORDER BY "col_int64" ASC`))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `SELECT * FROM "bulk_ingest_bind" ORDER BY "col_int64" ASC`))
 	rdr, n, err := suite.stmt.ExecuteQuery(suite.ctx)
 	suite.Require().NoError(err)
 	defer rdr.Release()
@@ -580,20 +593,20 @@ func (suite *SnowflakeTests) TestSqlIngestRecordAndStreamAreEquivalent() {
 	resultBind := rdr.RecordBatch()
 
 	// New session to clean up TEMPORARY resources in Snowflake associated with the previous one
-	suite.NoError(suite.stmt.Close())
-	suite.NoError(suite.cnxn.Close())
+	suite.NoError(suite.stmt.Close(suite.ctx))
+	suite.NoError(suite.cnxn.Close(suite.ctx))
 	suite.cnxn, err = suite.db.Open(suite.ctx)
 	suite.NoError(err)
-	suite.stmt, err = suite.cnxn.NewStatement()
+	suite.stmt, err = suite.cnxn.NewStatement(suite.ctx)
 	suite.NoError(err)
 
 	suite.Require().NoError(suite.stmt.BindStream(suite.ctx, stream))
-	suite.Require().NoError(suite.stmt.SetOption(adbc.OptionKeyIngestTargetTable, "bulk_ingest_bind_stream"))
+	suite.Require().NoError(suite.stmt.SetOption(suite.ctx, adbc.OptionKeyIngestTargetTable, "bulk_ingest_bind_stream"))
 	n, err = suite.stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
 	suite.EqualValues(3, n)
 
-	suite.Require().NoError(suite.stmt.SetSqlQuery(`SELECT * FROM "bulk_ingest_bind_stream" ORDER BY "col_int64" ASC`))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `SELECT * FROM "bulk_ingest_bind_stream" ORDER BY "col_int64" ASC`))
 	rdr, n, err = suite.stmt.ExecuteQuery(suite.ctx)
 	suite.Require().NoError(err)
 	defer rdr.Release()
@@ -672,12 +685,12 @@ func (suite *SnowflakeTests) TestSqlIngestRoundtripTypes() {
 	defer rec.Release()
 
 	suite.Require().NoError(suite.stmt.Bind(suite.ctx, rec))
-	suite.Require().NoError(suite.stmt.SetOption(adbc.OptionKeyIngestTargetTable, "bulk_ingest_roundtrip"))
+	suite.Require().NoError(suite.stmt.SetOption(suite.ctx, adbc.OptionKeyIngestTargetTable, "bulk_ingest_roundtrip"))
 	n, err := suite.stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
 	suite.EqualValues(3, n)
 
-	suite.Require().NoError(suite.stmt.SetSqlQuery(`SELECT * FROM "bulk_ingest_roundtrip" ORDER BY "col_int64" ASC`))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `SELECT * FROM "bulk_ingest_roundtrip" ORDER BY "col_int64" ASC`))
 	rdr, n, err := suite.stmt.ExecuteQuery(suite.ctx)
 	suite.Require().NoError(err)
 	defer rdr.Release()
@@ -695,7 +708,7 @@ func (suite *SnowflakeTests) TestSqlIngestTimestampTypes() {
 	suite.Require().NoError(suite.Quirks.DropTable(suite.cnxn, "bulk_ingest_timestamps"))
 
 	sessionTimezone := "America/Phoenix"
-	suite.Require().NoError(suite.stmt.SetSqlQuery(fmt.Sprintf(`ALTER SESSION SET TIMEZONE = "%s"`, sessionTimezone)))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, fmt.Sprintf(`ALTER SESSION SET TIMEZONE = "%s"`, sessionTimezone)))
 	_, err := suite.stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
 
@@ -745,12 +758,12 @@ func (suite *SnowflakeTests) TestSqlIngestTimestampTypes() {
 	defer rec.Release()
 
 	suite.Require().NoError(suite.stmt.Bind(suite.ctx, rec))
-	suite.Require().NoError(suite.stmt.SetOption(adbc.OptionKeyIngestTargetTable, "bulk_ingest_timestamps"))
+	suite.Require().NoError(suite.stmt.SetOption(suite.ctx, adbc.OptionKeyIngestTargetTable, "bulk_ingest_timestamps"))
 	n, err := suite.stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
 	suite.EqualValues(3, n)
 
-	suite.Require().NoError(suite.stmt.SetSqlQuery(`SELECT * FROM "bulk_ingest_timestamps" ORDER BY "col_int64" ASC`))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `SELECT * FROM "bulk_ingest_timestamps" ORDER BY "col_int64" ASC`))
 	rdr, n, err := suite.stmt.ExecuteQuery(suite.ctx)
 	suite.Require().NoError(err)
 	defer rdr.Release()
@@ -854,12 +867,12 @@ func (suite *SnowflakeTests) TestSqlIngestDate64Type() {
 	defer rec.Release()
 
 	suite.Require().NoError(suite.stmt.Bind(suite.ctx, rec))
-	suite.Require().NoError(suite.stmt.SetOption(adbc.OptionKeyIngestTargetTable, "bulk_ingest_date64"))
+	suite.Require().NoError(suite.stmt.SetOption(suite.ctx, adbc.OptionKeyIngestTargetTable, "bulk_ingest_date64"))
 	n, err := suite.stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
 	suite.EqualValues(3, n)
 
-	suite.Require().NoError(suite.stmt.SetSqlQuery(`SELECT * FROM "bulk_ingest_date64" ORDER BY "col_int64" ASC`))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `SELECT * FROM "bulk_ingest_date64" ORDER BY "col_int64" ASC`))
 	rdr, n, err := suite.stmt.ExecuteQuery(suite.ctx)
 	suite.Require().NoError(err)
 	defer rdr.Release()
@@ -944,15 +957,15 @@ func (suite *SnowflakeTests) TestSqlIngestHighPrecision() {
 	defer rec.Release()
 
 	suite.Require().NoError(suite.stmt.Bind(suite.ctx, rec))
-	suite.Require().NoError(suite.stmt.SetOption(adbc.OptionKeyIngestTargetTable, "bulk_ingest_high_precision"))
+	suite.Require().NoError(suite.stmt.SetOption(suite.ctx, adbc.OptionKeyIngestTargetTable, "bulk_ingest_high_precision"))
 	n, err := suite.stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
 	suite.EqualValues(3, n)
 
-	suite.Require().NoError(suite.stmt.SetSqlQuery(`SELECT * FROM "bulk_ingest_high_precision" ORDER BY "col_int64" ASC`))
-	suite.Require().NoError(suite.stmt.SetOption(driver.OptionUseHighPrecision, adbc.OptionValueEnabled))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `SELECT * FROM "bulk_ingest_high_precision" ORDER BY "col_int64" ASC`))
+	suite.Require().NoError(suite.stmt.SetOption(suite.ctx, driver.OptionUseHighPrecision, adbc.OptionValueEnabled))
 	defer func() {
-		suite.Require().NoError(suite.stmt.SetOption(driver.OptionUseHighPrecision, adbc.OptionValueDisabled))
+		suite.Require().NoError(suite.stmt.SetOption(suite.ctx, driver.OptionUseHighPrecision, adbc.OptionValueDisabled))
 	}()
 	rdr, n, err := suite.stmt.ExecuteQuery(suite.ctx)
 	suite.Require().NoError(err)
@@ -1052,12 +1065,12 @@ func (suite *SnowflakeTests) TestSqlIngestLowPrecision() {
 	defer rec.Release()
 
 	suite.Require().NoError(suite.stmt.Bind(suite.ctx, rec))
-	suite.Require().NoError(suite.stmt.SetOption(adbc.OptionKeyIngestTargetTable, "bulk_ingest_high_precision"))
+	suite.Require().NoError(suite.stmt.SetOption(suite.ctx, adbc.OptionKeyIngestTargetTable, "bulk_ingest_high_precision"))
 	n, err := suite.stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
 	suite.EqualValues(3, n)
 
-	suite.Require().NoError(suite.stmt.SetSqlQuery(`SELECT * FROM "bulk_ingest_high_precision" ORDER BY "col_int64" ASC`))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `SELECT * FROM "bulk_ingest_high_precision" ORDER BY "col_int64" ASC`))
 	// OptionUseHighPrecision already disabled
 	rdr, n, err := suite.stmt.ExecuteQuery(suite.ctx)
 	suite.Require().NoError(err)
@@ -1167,12 +1180,12 @@ func (suite *SnowflakeTests) TestSqlIngestStructType() {
 	defer rec.Release()
 
 	suite.Require().NoError(suite.stmt.Bind(suite.ctx, rec))
-	suite.Require().NoError(suite.stmt.SetOption(adbc.OptionKeyIngestTargetTable, "bulk_ingest_struct"))
+	suite.Require().NoError(suite.stmt.SetOption(suite.ctx, adbc.OptionKeyIngestTargetTable, "bulk_ingest_struct"))
 	n, err := suite.stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
 	suite.EqualValues(3, n)
 
-	suite.Require().NoError(suite.stmt.SetSqlQuery(`SELECT * FROM "bulk_ingest_struct" ORDER BY "col_int64" ASC`))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `SELECT * FROM "bulk_ingest_struct" ORDER BY "col_int64" ASC`))
 	rdr, n, err := suite.stmt.ExecuteQuery(suite.ctx)
 	suite.Require().NoError(err)
 	defer rdr.Release()
@@ -1268,12 +1281,12 @@ func (suite *SnowflakeTests) TestSqlIngestMapType() {
 	defer rec.Release()
 
 	suite.Require().NoError(suite.stmt.Bind(suite.ctx, rec))
-	suite.Require().NoError(suite.stmt.SetOption(adbc.OptionKeyIngestTargetTable, "bulk_ingest_map"))
+	suite.Require().NoError(suite.stmt.SetOption(suite.ctx, adbc.OptionKeyIngestTargetTable, "bulk_ingest_map"))
 	n, err := suite.stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
 	suite.EqualValues(3, n)
 
-	suite.Require().NoError(suite.stmt.SetSqlQuery(`SELECT * FROM "bulk_ingest_map" ORDER BY "col_int64" ASC`))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `SELECT * FROM "bulk_ingest_map" ORDER BY "col_int64" ASC`))
 	rdr, n, err := suite.stmt.ExecuteQuery(suite.ctx)
 	suite.Require().NoError(err)
 	defer rdr.Release()
@@ -1354,12 +1367,12 @@ func (suite *SnowflakeTests) TestSqlIngestListType() {
 	defer rec.Release()
 
 	suite.Require().NoError(suite.stmt.Bind(suite.ctx, rec))
-	suite.Require().NoError(suite.stmt.SetOption(adbc.OptionKeyIngestTargetTable, "bulk_ingest_list"))
+	suite.Require().NoError(suite.stmt.SetOption(suite.ctx, adbc.OptionKeyIngestTargetTable, "bulk_ingest_list"))
 	n, err := suite.stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
 	suite.EqualValues(3, n)
 
-	suite.Require().NoError(suite.stmt.SetSqlQuery(`SELECT * FROM "bulk_ingest_list" ORDER BY "col_int64" ASC`))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `SELECT * FROM "bulk_ingest_list" ORDER BY "col_int64" ASC`))
 	rdr, n, err := suite.stmt.ExecuteQuery(suite.ctx)
 	suite.Require().NoError(err)
 	defer rdr.Release()
@@ -1409,7 +1422,7 @@ func (suite *SnowflakeTests) TestSqlIngestListType() {
 
 func (suite *SnowflakeTests) TestStatementEmptyResultSet() {
 	// Regression test for https://github.com/apache/arrow-adbc/issues/863
-	suite.NoError(suite.stmt.SetSqlQuery("SHOW WAREHOUSES"))
+	suite.NoError(suite.stmt.SetSqlQuery(suite.ctx, "SHOW WAREHOUSES"))
 
 	// XXX: there IS data in this result set, but Snowflake doesn't
 	// appear to support getting the results as Arrow
@@ -1487,7 +1500,7 @@ func (suite *SnowflakeTests) TestMetadataGetObjectsColumnsXdbc() {
 	suite.Require().NoError(suite.Quirks.CreateSampleTable("bulk_ingest2", rec))
 
 	db := sql.OpenDB(suite.Quirks.connector)
-	defer validation.CheckedClose(suite.T(), db)
+	defer testutil.CheckedClose(suite.T(), db)
 
 	_, err = db.ExecContext(suite.ctx, `ALTER TABLE "bulk_ingest2" ADD CONSTRAINT bulk_ingest2_pk PRIMARY KEY (int64s, strings)`)
 	suite.Require().NoError(err)
@@ -1656,13 +1669,13 @@ func (suite *SnowflakeTests) TestNewDatabaseGetSetOptions() {
 	key1, val1 := "key1", "val1"
 	key2, val2 := "key2", "val2"
 
-	db, err := suite.driver.NewDatabase(map[string]string{
+	db, err := suite.driver.NewDatabaseWithContext(suite.ctx, map[string]string{
 		key1: val1,
 		key2: val2,
 	})
 	suite.NoError(err)
 	suite.NotNil(db)
-	defer validation.CheckedClose(suite.T(), db)
+	defer testutil.CheckedCloseWithContext(suite.T(), db, suite.ctx)
 
 	getSetDB, ok := db.(adbc.GetSetOptions)
 	suite.True(ok)
@@ -1688,11 +1701,11 @@ func (suite *SnowflakeTests) TestNewDatabaseGetSetOptions() {
 }
 
 func (suite *SnowflakeTests) TestTimestampSnow() {
-	suite.Require().NoError(suite.stmt.SetSqlQuery(`ALTER SESSION SET TIMEZONE = "America/New_York"`))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `ALTER SESSION SET TIMEZONE = "America/New_York"`))
 	_, err := suite.stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
 
-	suite.Require().NoError(suite.stmt.SetSqlQuery("SHOW WAREHOUSES"))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, "SHOW WAREHOUSES"))
 	rdr, _, err := suite.stmt.ExecuteQuery(suite.ctx)
 	suite.Require().NoError(err)
 	defer rdr.Release()
@@ -1712,7 +1725,7 @@ func (suite *SnowflakeTests) TestTimestampSnow() {
 }
 
 func (suite *SnowflakeTests) TestBooleanType() {
-	suite.Require().NoError(suite.stmt.SetSqlQuery("select * from (SELECT CAST(TRUE  as BOOLEAN) as BOOLEANTYPE) as \"_\" where 0 = 1"))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, "select * from (SELECT CAST(TRUE  as BOOLEAN) as BOOLEANTYPE) as \"_\" where 0 = 1"))
 	rdr, _, err := suite.stmt.ExecuteQuery(suite.ctx)
 	suite.Require().NoError(err)
 	defer rdr.Release()
@@ -1732,13 +1745,13 @@ func (suite *SnowflakeTests) TestTimestampPrecisionJson() {
 	opts := suite.Quirks.DatabaseOptions()
 	opts[driver.OptionMaxTimestampPrecision] = "microseconds"
 
-	db, err := suite.driver.NewDatabase(opts)
+	db, err := suite.driver.NewDatabaseWithContext(suite.ctx, opts)
 	suite.NoError(err)
-	defer validation.CheckedClose(suite.T(), db)
+	defer testutil.CheckedCloseWithContext(suite.T(), db, suite.ctx)
 	cnxn, err := db.Open(suite.ctx)
 	suite.NoError(err)
-	defer validation.CheckedClose(suite.T(), cnxn)
-	stmt, _ := cnxn.NewStatement()
+	defer testutil.CheckedCloseWithContext(suite.T(), cnxn, suite.ctx)
+	stmt, _ := cnxn.NewStatement(suite.ctx)
 
 	id := uuid.New()
 	tempTable := "pk_" + strings.ReplaceAll(id.String(), "-", "")
@@ -1747,14 +1760,14 @@ func (suite *SnowflakeTests) TestTimestampPrecisionJson() {
 	id INT PRIMARY KEY,
 	name STRING);`, suite.Quirks.catalogName, suite.Quirks.schemaName, tempTable)
 
-	suite.Require().NoError(stmt.SetSqlQuery(query))
+	suite.Require().NoError(stmt.SetSqlQuery(suite.ctx, query))
 	_, err = stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
-	suite.Require().NoError(stmt.Close())
+	suite.Require().NoError(stmt.Close(suite.ctx))
 
 	query = fmt.Sprintf("SHOW PRIMARY KEYS IN TABLE %s.%s.%s", suite.Quirks.catalogName, suite.Quirks.schemaName, tempTable)
-	stmt, _ = cnxn.NewStatement()
-	suite.Require().NoError(stmt.SetSqlQuery(query))
+	stmt, _ = cnxn.NewStatement(suite.ctx)
+	suite.Require().NoError(stmt.SetSqlQuery(suite.ctx, query))
 	rdr, _, err := stmt.ExecuteQuery(suite.ctx)
 	defer rdr.Release()
 	suite.Require().NoError(err)
@@ -1810,14 +1823,14 @@ func (suite *SnowflakeTests) TestTimestampPrecisionJson() {
 	} else {
 		panic("Invalid values")
 	}
-	suite.Require().NoError(stmt.Close())
+	suite.Require().NoError(stmt.Close(suite.ctx))
 
 	query = fmt.Sprintf("DROP TABLE %s.%s.%s", suite.Quirks.catalogName, suite.Quirks.schemaName, tempTable)
-	stmt, _ = cnxn.NewStatement()
-	suite.Require().NoError(stmt.SetSqlQuery(query))
+	stmt, _ = cnxn.NewStatement(suite.ctx)
+	suite.Require().NoError(stmt.SetSqlQuery(suite.ctx, query))
 	_, err = stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
-	suite.Require().NoError(stmt.Close())
+	suite.Require().NoError(stmt.Close(suite.ctx))
 }
 
 func (suite *SnowflakeTests) TestTimestampPrecision() {
@@ -1926,14 +1939,14 @@ func (suite *SnowflakeTests) getTimestamps(query string, maxTimestampPrecision s
 	if maxTimestampPrecision != "" {
 		opts[driver.OptionMaxTimestampPrecision] = maxTimestampPrecision
 	}
-	db, err := suite.driver.NewDatabase(opts)
+	db, err := suite.driver.NewDatabaseWithContext(suite.ctx, opts)
 	suite.NoError(err)
-	defer validation.CheckedClose(suite.T(), db)
+	defer testutil.CheckedCloseWithContext(suite.T(), db, suite.ctx)
 	cnxn, err := db.Open(suite.ctx)
 	suite.NoError(err)
-	defer validation.CheckedClose(suite.T(), cnxn)
-	stmt, _ := cnxn.NewStatement()
-	suite.Require().NoError(stmt.SetSqlQuery(query))
+	defer testutil.CheckedCloseWithContext(suite.T(), cnxn, suite.ctx)
+	stmt, _ := cnxn.NewStatement(suite.ctx)
+	suite.Require().NoError(stmt.SetSqlQuery(suite.ctx, query))
 	rdr, _, err := stmt.ExecuteQuery(suite.ctx)
 	suite.Require().NoError(err)
 
@@ -1965,19 +1978,19 @@ func (suite *SnowflakeTests) validateTimestamps(query string, rec arrow.RecordBa
 func (suite *SnowflakeTests) TestUseHighPrecision() {
 	suite.Require().NoError(suite.Quirks.DropTable(suite.cnxn, "NUMBERTYPETEST"))
 
-	suite.Require().NoError(suite.stmt.SetSqlQuery(`CREATE OR REPLACE TABLE NUMBERTYPETEST (
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `CREATE OR REPLACE TABLE NUMBERTYPETEST (
 		NUMBERDECIMAL NUMBER(38,0),
 		NUMBERFLOAT NUMBER(15,2)
 	)`))
 	_, err := suite.stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
 
-	suite.Require().NoError(suite.stmt.SetSqlQuery(`INSERT INTO NUMBERTYPETEST (NUMBERDECIMAL, NUMBERFLOAT)
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `INSERT INTO NUMBERTYPETEST (NUMBERDECIMAL, NUMBERFLOAT)
 		VALUES (1, 1234567.894), (12345678901234567890123456789012345678, 9876543210.987)`))
 	_, err = suite.stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
-	suite.Require().NoError(suite.stmt.SetOption(driver.OptionUseHighPrecision, adbc.OptionValueEnabled))
-	suite.Require().NoError(suite.stmt.SetSqlQuery("SELECT * FROM NUMBERTYPETEST"))
+	suite.Require().NoError(suite.stmt.SetOption(suite.ctx, driver.OptionUseHighPrecision, adbc.OptionValueEnabled))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, "SELECT * FROM NUMBERTYPETEST"))
 	rdr, n, err := suite.stmt.ExecuteQuery(suite.ctx)
 	suite.Require().NoError(err)
 	defer rdr.Release()
@@ -1986,8 +1999,8 @@ func (suite *SnowflakeTests) TestUseHighPrecision() {
 	suite.Truef(arrow.TypeEqual(&arrow.Decimal128Type{Precision: 38, Scale: 0}, rdr.Schema().Field(0).Type), "expected decimal(38, 0), got %s", rdr.Schema().Field(0).Type)
 	suite.Truef(arrow.TypeEqual(&arrow.Decimal128Type{Precision: 15, Scale: 2}, rdr.Schema().Field(1).Type), "expected decimal(15, 2), got %s", rdr.Schema().Field(1).Type)
 
-	suite.Require().NoError(suite.stmt.SetOption(driver.OptionUseHighPrecision, adbc.OptionValueDisabled))
-	suite.Require().NoError(suite.stmt.SetSqlQuery("SELECT * FROM NUMBERTYPETEST"))
+	suite.Require().NoError(suite.stmt.SetOption(suite.ctx, driver.OptionUseHighPrecision, adbc.OptionValueDisabled))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, "SELECT * FROM NUMBERTYPETEST"))
 	rdr, n, err = suite.stmt.ExecuteQuery(suite.ctx)
 	suite.Require().NoError(err)
 	defer rdr.Release()
@@ -2014,8 +2027,8 @@ func (suite *SnowflakeTests) TestDecimalHighPrecision() {
 				number, err := decimal128.FromString(numberString, int32(precision), int32(scale))
 				suite.NoError(err)
 
-				suite.Require().NoError(suite.stmt.SetOption(driver.OptionUseHighPrecision, adbc.OptionValueEnabled))
-				suite.Require().NoError(suite.stmt.SetSqlQuery(query))
+				suite.Require().NoError(suite.stmt.SetOption(suite.ctx, driver.OptionUseHighPrecision, adbc.OptionValueEnabled))
+				suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, query))
 				rdr, n, err := suite.stmt.ExecuteQuery(suite.ctx)
 				suite.Require().NoError(err)
 				defer rdr.Release()
@@ -2044,8 +2057,8 @@ func (suite *SnowflakeTests) TestNonIntDecimalLowPrecision() {
 			suite.NoError(err)
 			number := decimalNumber.ToFloat64(int32(scale))
 
-			suite.Require().NoError(suite.stmt.SetOption(driver.OptionUseHighPrecision, adbc.OptionValueDisabled))
-			suite.Require().NoError(suite.stmt.SetSqlQuery(query))
+			suite.Require().NoError(suite.stmt.SetOption(suite.ctx, driver.OptionUseHighPrecision, adbc.OptionValueDisabled))
+			suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, query))
 			rdr, n, err := suite.stmt.ExecuteQuery(suite.ctx)
 			suite.Require().NoError(err)
 			defer rdr.Release()
@@ -2070,22 +2083,22 @@ func (suite *SnowflakeTests) TestSchemaWithLowPrecision() {
 	// This is critical for clients that rely on the schema being correct
 	suite.Require().NoError(suite.Quirks.DropTable(suite.cnxn, "SCHEMA_TYPE_TEST"))
 
-	suite.Require().NoError(suite.stmt.SetSqlQuery(`CREATE OR REPLACE TABLE SCHEMA_TYPE_TEST (
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `CREATE OR REPLACE TABLE SCHEMA_TYPE_TEST (
 		INTEGER_COL NUMBER(10,0),
 		DECIMAL_COL NUMBER(10,2)
 	)`))
 	_, err := suite.stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
 
-	suite.Require().NoError(suite.stmt.SetSqlQuery(`INSERT INTO SCHEMA_TYPE_TEST VALUES
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `INSERT INTO SCHEMA_TYPE_TEST VALUES
 		(12345, 123.45),
 		(67890, 678.90)`))
 	_, err = suite.stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
 
 	// Test with use_high_precision=false
-	suite.Require().NoError(suite.stmt.SetOption(driver.OptionUseHighPrecision, adbc.OptionValueDisabled))
-	suite.Require().NoError(suite.stmt.SetSqlQuery("SELECT * FROM SCHEMA_TYPE_TEST"))
+	suite.Require().NoError(suite.stmt.SetOption(suite.ctx, driver.OptionUseHighPrecision, adbc.OptionValueDisabled))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, "SELECT * FROM SCHEMA_TYPE_TEST"))
 
 	// First test: ExecuteSchema (schema only, no data)
 	schemaOnly, err := suite.stmt.(adbc.StatementExecuteSchema).ExecuteSchema(suite.ctx)
@@ -2152,8 +2165,8 @@ func (suite *SnowflakeTests) TestIntDecimalLowPrecision() {
 			// return the low 64 bits of the value.
 			number := int64(decimalNumber.LowBits())
 
-			suite.Require().NoError(suite.stmt.SetOption(driver.OptionUseHighPrecision, adbc.OptionValueDisabled))
-			suite.Require().NoError(suite.stmt.SetSqlQuery(query))
+			suite.Require().NoError(suite.stmt.SetOption(suite.ctx, driver.OptionUseHighPrecision, adbc.OptionValueDisabled))
+			suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, query))
 			rdr, n, err := suite.stmt.ExecuteQuery(suite.ctx)
 			suite.Require().NoError(err)
 			defer rdr.Release()
@@ -2170,8 +2183,8 @@ func (suite *SnowflakeTests) TestIntDecimalLowPrecision() {
 }
 
 func (suite *SnowflakeTests) TestDescribeOnly() {
-	suite.Require().NoError(suite.stmt.SetOption(driver.OptionUseHighPrecision, adbc.OptionValueEnabled))
-	suite.Require().NoError(suite.stmt.SetSqlQuery("SELECT CAST('9999.99' AS NUMBER(6, 2)) AS RESULT"))
+	suite.Require().NoError(suite.stmt.SetOption(suite.ctx, driver.OptionUseHighPrecision, adbc.OptionValueEnabled))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, "SELECT CAST('9999.99' AS NUMBER(6, 2)) AS RESULT"))
 	schema, err := suite.stmt.(adbc.StatementExecuteSchema).ExecuteSchema(suite.ctx)
 	suite.Require().NoError(err)
 
@@ -2289,14 +2302,14 @@ func ConnectWithJwt(t *testing.T, cfg *gosnowflake.Config, keyValue, passcode st
 
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	adbcDriver := driver.NewDriver(mem)
-	db, err := adbcDriver.NewDatabase(opts)
+	db, err := adbcDriver.NewDatabaseWithContext(context.Background(), opts)
 	assert.NoError(t, err)
-	defer validation.CheckedClose(t, db)
+	defer testutil.CheckedCloseWithContext(t, db, context.Background())
 
 	cnxn, err := db.Open(context.Background())
 	if isAuthorized {
 		assert.NoError(t, err)
-		defer validation.CheckedClose(t, cnxn)
+		defer testutil.CheckedCloseWithContext(t, cnxn, context.Background())
 	} else {
 		adbcErr, ok := err.(adbc.Error)
 		assert.True(t, ok)
@@ -2323,7 +2336,7 @@ func (suite *SnowflakeTests) TestJwtPrivateKey() {
 
 	// set the Snowflake user's RSA public key
 	setKey := func(privKey *rsa.PrivateKey) {
-		suite.NoError(suite.stmt.SetSqlQuery("USE ROLE ACCOUNTADMIN"))
+		suite.NoError(suite.stmt.SetSqlQuery(suite.ctx, "USE ROLE ACCOUNTADMIN"))
 		_, err := suite.stmt.ExecuteUpdate(suite.ctx)
 		suite.NoError(err)
 
@@ -2331,9 +2344,9 @@ func (suite *SnowflakeTests) TestJwtPrivateKey() {
 			pubKeyBytes, err := x509.MarshalPKIXPublicKey(privKey.Public())
 			suite.NoError(err)
 			encodedKey := base64.StdEncoding.EncodeToString(pubKeyBytes)
-			suite.NoError(suite.stmt.SetSqlQuery(fmt.Sprintf("ALTER USER %s SET RSA_PUBLIC_KEY='%s'", username, encodedKey)))
+			suite.NoError(suite.stmt.SetSqlQuery(suite.ctx, fmt.Sprintf("ALTER USER %s SET RSA_PUBLIC_KEY='%s'", username, encodedKey)))
 		} else {
-			suite.NoError(suite.stmt.SetSqlQuery(fmt.Sprintf("ALTER USER %s SET RSA_PUBLIC_KEY=''", username)))
+			suite.NoError(suite.stmt.SetSqlQuery(suite.ctx, fmt.Sprintf("ALTER USER %s SET RSA_PUBLIC_KEY=''", username)))
 		}
 		_, err = suite.stmt.ExecuteUpdate(suite.ctx)
 		suite.NoError(err)
@@ -2344,17 +2357,17 @@ func (suite *SnowflakeTests) TestJwtPrivateKey() {
 		opts := suite.Quirks.DatabaseOptions()
 		opts[driver.OptionAuthType] = driver.OptionValueAuthJwt
 		opts[driver.OptionJwtPrivateKey] = keyFile
-		db, err := suite.driver.NewDatabase(opts)
+		db, err := suite.driver.NewDatabaseWithContext(suite.ctx, opts)
 		suite.NoError(err)
-		defer validation.CheckedClose(suite.T(), db)
+		defer testutil.CheckedCloseWithContext(suite.T(), db, suite.ctx)
 		cnxn, err := db.Open(suite.ctx)
 		suite.NoError(err)
-		defer validation.CheckedClose(suite.T(), cnxn)
-		stmt, err := cnxn.NewStatement()
+		defer testutil.CheckedCloseWithContext(suite.T(), cnxn, suite.ctx)
+		stmt, err := cnxn.NewStatement(suite.ctx)
 		suite.NoError(err)
-		defer validation.CheckedClose(suite.T(), stmt)
+		defer testutil.CheckedCloseWithContext(suite.T(), stmt, suite.ctx)
 
-		suite.NoError(stmt.SetSqlQuery("SELECT 1"))
+		suite.NoError(stmt.SetSqlQuery(suite.ctx, "SELECT 1"))
 		rdr, _, err := stmt.ExecuteQuery(suite.ctx)
 		defer rdr.Release()
 		suite.NoError(err)
@@ -2373,9 +2386,7 @@ func (suite *SnowflakeTests) TestJwtPrivateKey() {
 		Bytes: x509.MarshalPKCS1PrivateKey(rsaKey),
 	})
 	pkcs1Key := writeKey("key.pem", rsaKeyPem)
-	defer validation.CheckedCleanup(suite.T(), func() error {
-		return os.Remove(pkcs1Key)
-	})
+	suite.T().Cleanup(func() { suite.NoError(os.Remove(pkcs1Key)) })
 	verifyKey(pkcs1Key)
 
 	// PKCS8 key
@@ -2385,31 +2396,27 @@ func (suite *SnowflakeTests) TestJwtPrivateKey() {
 		Bytes: rsaKeyP8Bytes,
 	})
 	pkcs8Key := writeKey("key.p8", rsaKeyP8)
-	defer validation.CheckedCleanup(suite.T(), func() error {
-		return os.Remove(pkcs8Key)
-	})
+	suite.T().Cleanup(func() { suite.NoError(os.Remove(pkcs8Key)) })
 	verifyKey(pkcs8Key)
 
 	// binary key
 	block, _ := pem.Decode([]byte(rsaKeyPem))
 	binKey := writeKey("key.bin", block.Bytes)
-	defer validation.CheckedCleanup(suite.T(), func() error {
-		return os.Remove(binKey)
-	})
+	suite.T().Cleanup(func() { suite.NoError(os.Remove(binKey)) })
 	verifyKey(binKey)
 }
 
 func (suite *SnowflakeTests) TestMetadataOnlyQuery() {
 	// force more than one chunk for `SHOW FUNCTIONS` which will return
 	// JSON data instead of arrow, even though we ask for Arrow
-	suite.Require().NoError(suite.stmt.SetSqlQuery(`ALTER SESSION SET CLIENT_RESULT_CHUNK_SIZE = 50`))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `ALTER SESSION SET CLIENT_RESULT_CHUNK_SIZE = 50`))
 	_, err := suite.stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
 
 	// since we lowered the CLIENT_RESULT_CHUNK_SIZE this will return at least
 	// 1 chunk in addition to the first one. Metadata queries will return JSON
 	// no matter what currently.
-	suite.Require().NoError(suite.stmt.SetSqlQuery(`SHOW FUNCTIONS`))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `SHOW FUNCTIONS`))
 	rdr, n, err := suite.stmt.ExecuteQuery(suite.ctx)
 	suite.Require().NoError(err)
 	defer rdr.Release()
@@ -2455,7 +2462,7 @@ func (suite *SnowflakeTests) TestMetadataOnlyQueryAutodetectJSON() {
 func (suite *SnowflakeTests) TestEmptyResultSet() {
 	// regression test for apache/arrow-adbc#1804
 	// this would previously crash
-	suite.Require().NoError(suite.stmt.SetSqlQuery(`SELECT 42 WHERE 1=0`))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `SELECT 42 WHERE 1=0`))
 	rdr, n, err := suite.stmt.ExecuteQuery(suite.ctx)
 	suite.Require().NoError(err)
 	defer rdr.Release()
@@ -2499,8 +2506,8 @@ func (suite *SnowflakeTests) TestIngestEmptyChunk() {
 	defer rdr.Release()
 
 	suite.Require().NoError(suite.stmt.BindStream(suite.ctx, rdr))
-	suite.Require().NoError(suite.stmt.SetOption(adbc.OptionKeyIngestTargetTable, "bulk_ingest_empty_chunk"))
-	suite.Require().NoError(suite.stmt.SetOption(driver.OptionStatementIngestWriterConcurrency, "1"))
+	suite.Require().NoError(suite.stmt.SetOption(suite.ctx, adbc.OptionKeyIngestTargetTable, "bulk_ingest_empty_chunk"))
+	suite.Require().NoError(suite.stmt.SetOption(suite.ctx, driver.OptionStatementIngestWriterConcurrency, "1"))
 
 	n, err := suite.stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
@@ -2514,13 +2521,13 @@ func TestIngestCancelContext(t *testing.T) {
 		drv := q.SetupDriver(t)
 		defer q.TearDownDriver(t, drv)
 
-		db, err := drv.NewDatabase(q.DatabaseOptions())
+		db, err := drv.NewDatabaseWithContext(ctx, q.DatabaseOptions())
 		require.NoError(t, err)
 
 		cnxn, err := db.Open(ctx)
 		require.NoError(t, err)
 
-		stmt, err := cnxn.NewStatement()
+		stmt, err := cnxn.NewStatement(ctx)
 		require.NoError(t, err)
 
 		require.NoError(t, q.DropTable(cnxn, "bulk_ingest_cancel_context"))
@@ -2545,7 +2552,7 @@ func TestIngestCancelContext(t *testing.T) {
 		defer rdr.Release()
 
 		require.NoError(t, stmt.BindStream(ctx, rdr))
-		require.NoError(t, stmt.SetOption(adbc.OptionKeyIngestTargetTable, "bulk_ingest_cancel_context"))
+		require.NoError(t, stmt.SetOption(ctx, adbc.OptionKeyIngestTargetTable, "bulk_ingest_cancel_context"))
 
 		var buf bytes.Buffer
 		logger := gosnowflake.GetLogger()
@@ -2558,9 +2565,9 @@ func TestIngestCancelContext(t *testing.T) {
 		require.EqualValues(t, int64(3), n)
 		cancel()
 
-		require.NoError(t, stmt.Close())
-		require.NoError(t, cnxn.Close())
-		require.NoError(t, db.Close())
+		require.NoError(t, stmt.Close(ctx))
+		require.NoError(t, cnxn.Close(ctx))
+		require.NoError(t, db.Close(ctx))
 
 		require.Equal(t, "", buf.String())
 	})
@@ -2573,7 +2580,7 @@ func TestIngestWithQualifiedTableName(t *testing.T) {
 		drv := q.SetupDriver(t)
 		defer q.TearDownDriver(t, drv)
 
-		db, err := drv.NewDatabase(q.DatabaseOptions())
+		db, err := drv.NewDatabaseWithContext(ctx, q.DatabaseOptions())
 		require.NoError(t, err)
 
 		cnxn, err := db.Open(ctx)
@@ -2596,25 +2603,25 @@ func TestIngestWithQualifiedTableName(t *testing.T) {
 			tblName := "bulk_ingest_schema_qualified"
 			require.NoError(t, q.DropTable(cnxn, tblName))
 
-			stmt, err := cnxn.NewStatement()
+			stmt, err := cnxn.NewStatement(ctx)
 			require.NoError(t, err)
 
 			require.NoError(t, stmt.Bind(ctx, rec))
-			require.NoError(t, stmt.SetOption(adbc.OptionKeyIngestTargetTable, tblName))
-			require.NoError(t, stmt.SetOption(adbc.OptionValueIngestTargetDBSchema, q.DBSchema()))
+			require.NoError(t, stmt.SetOption(ctx, adbc.OptionKeyIngestTargetTable, tblName))
+			require.NoError(t, stmt.SetOption(ctx, adbc.OptionValueIngestTargetDBSchema, q.DBSchema()))
 
 			n, err := stmt.ExecuteUpdate(ctx)
 			require.NoError(t, err)
 			require.EqualValues(t, 3, n)
 
-			require.NoError(t, stmt.SetSqlQuery(fmt.Sprintf(`SELECT * FROM "%s"."%s" ORDER BY "col_int64" ASC`, q.DBSchema(), tblName)))
+			require.NoError(t, stmt.SetSqlQuery(ctx, fmt.Sprintf(`SELECT * FROM "%s"."%s" ORDER BY "col_int64" ASC`, q.DBSchema(), tblName)))
 			rdr, _, err := stmt.ExecuteQuery(ctx)
 			require.NoError(t, err)
 			defer rdr.Release()
 			require.True(t, rdr.Next())
 			require.EqualValues(t, 3, rdr.RecordBatch().NumRows())
 
-			require.NoError(t, stmt.Close())
+			require.NoError(t, stmt.Close(ctx))
 			require.NoError(t, q.DropTable(cnxn, tblName))
 		})
 
@@ -2623,31 +2630,31 @@ func TestIngestWithQualifiedTableName(t *testing.T) {
 			tblName := "bulk_ingest_fully_qualified"
 			require.NoError(t, q.DropTable(cnxn, tblName))
 
-			stmt, err := cnxn.NewStatement()
+			stmt, err := cnxn.NewStatement(ctx)
 			require.NoError(t, err)
 
 			require.NoError(t, stmt.Bind(ctx, rec))
-			require.NoError(t, stmt.SetOption(adbc.OptionKeyIngestTargetTable, tblName))
-			require.NoError(t, stmt.SetOption(adbc.OptionValueIngestTargetCatalog, q.Catalog()))
-			require.NoError(t, stmt.SetOption(adbc.OptionValueIngestTargetDBSchema, q.DBSchema()))
+			require.NoError(t, stmt.SetOption(ctx, adbc.OptionKeyIngestTargetTable, tblName))
+			require.NoError(t, stmt.SetOption(ctx, adbc.OptionValueIngestTargetCatalog, q.Catalog()))
+			require.NoError(t, stmt.SetOption(ctx, adbc.OptionValueIngestTargetDBSchema, q.DBSchema()))
 
 			n, err := stmt.ExecuteUpdate(ctx)
 			require.NoError(t, err)
 			require.EqualValues(t, 3, n)
 
-			require.NoError(t, stmt.SetSqlQuery(fmt.Sprintf(`SELECT * FROM "%s"."%s"."%s" ORDER BY "col_int64" ASC`, q.Catalog(), q.DBSchema(), tblName)))
+			require.NoError(t, stmt.SetSqlQuery(ctx, fmt.Sprintf(`SELECT * FROM "%s"."%s"."%s" ORDER BY "col_int64" ASC`, q.Catalog(), q.DBSchema(), tblName)))
 			rdr, _, err := stmt.ExecuteQuery(ctx)
 			require.NoError(t, err)
 			defer rdr.Release()
 			require.True(t, rdr.Next())
 			require.EqualValues(t, 3, rdr.RecordBatch().NumRows())
 
-			require.NoError(t, stmt.Close())
+			require.NoError(t, stmt.Close(ctx))
 			require.NoError(t, q.DropTable(cnxn, tblName))
 		})
 
-		require.NoError(t, cnxn.Close())
-		require.NoError(t, db.Close())
+		require.NoError(t, cnxn.Close(ctx))
+		require.NoError(t, db.Close(ctx))
 	})
 }
 
@@ -2675,9 +2682,9 @@ func (suite *SnowflakeTests) TestChangeDatabaseAndGetObjects() {
 	cfg, err := gosnowflake.ParseDSN(uri)
 	suite.NoError(err)
 
-	cnxnopt, ok := suite.cnxn.(adbc.PostInitOptions)
+	cnxnopt, ok := suite.cnxn.(adbc.GetSetOptionsWithContext)
 	suite.True(ok)
-	err = cnxnopt.SetOption(adbc.OptionKeyCurrentCatalog, newCatalog)
+	err = cnxnopt.SetOption(suite.ctx, adbc.OptionKeyCurrentCatalog, newCatalog)
 	suite.NoError(err)
 
 	_, err2 := suite.cnxn.GetObjects(suite.ctx, adbc.ObjectDepthAll, &newCatalog, &cfg.Schema, &getObjectsTable, nil, nil)
@@ -2689,11 +2696,11 @@ func (suite *SnowflakeTests) TestGetSetClientConfigFile() {
 	options := map[string]string{
 		driver.OptionClientConfigFile: file,
 	}
-	getSetDB, ok := suite.db.(adbc.GetSetOptions)
-	suite.True(ok)
-	err := suite.db.SetOptions(options)
+	err := suite.db.SetOptions(suite.ctx, options)
 	suite.NoError(err)
-	result, err := getSetDB.GetOption(driver.OptionClientConfigFile)
+	getSetDB, ok := suite.db.(adbc.GetSetOptionsWithContext)
+	suite.True(ok)
+	result, err := getSetDB.GetOption(suite.ctx, driver.OptionClientConfigFile)
 	suite.NoError(err)
 	suite.True(file == result)
 }
@@ -2793,13 +2800,15 @@ func (suite *SnowflakeTests) TestQueryTag() {
 	u, err := uuid.NewV7()
 	suite.Require().NoError(err)
 	tag := u.String()
-	suite.Require().NoError(suite.stmt.SetOption(driver.OptionStatementQueryTag, tag))
+	suite.Require().NoError(suite.stmt.SetOption(suite.ctx, driver.OptionStatementQueryTag, tag))
 
-	val, err := suite.stmt.(adbc.GetSetOptions).GetOption(driver.OptionStatementQueryTag)
+	getSetStmt, ok := suite.stmt.(adbc.GetSetOptionsWithContext)
+	suite.Require().True(ok)
+	val, err := getSetStmt.GetOption(suite.ctx, driver.OptionStatementQueryTag)
 	suite.Require().NoError(err)
 	suite.Require().Equal(tag, val)
 
-	suite.Require().NoError(suite.stmt.SetSqlQuery("SELECT 1"))
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, "SELECT 1"))
 	rdr, n, err := suite.stmt.ExecuteQuery(suite.ctx)
 	suite.Require().NoError(err)
 	defer rdr.Release()
@@ -2810,9 +2819,9 @@ func (suite *SnowflakeTests) TestQueryTag() {
 	suite.Require().NoError(rdr.Err())
 
 	// Unset tag
-	suite.Require().NoError(suite.stmt.SetOption(driver.OptionStatementQueryTag, ""))
+	suite.Require().NoError(suite.stmt.SetOption(suite.ctx, driver.OptionStatementQueryTag, ""))
 
-	suite.Require().NoError(suite.stmt.SetSqlQuery(fmt.Sprintf(`
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, fmt.Sprintf(`
 SELECT query_text
 FROM table(information_schema.query_history())
 WHERE query_tag = '%s'
@@ -2832,11 +2841,11 @@ ORDER BY start_time;
 
 func (suite *SnowflakeTests) TestGetObjectsVector() {
 	suite.Require().NoError(suite.Quirks.DropTable(suite.cnxn, "MYVECTORTABLE"))
-	suite.Require().NoError(suite.stmt.SetSqlQuery(`CREATE OR REPLACE TABLE myvectortable (
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `CREATE OR REPLACE TABLE myvectortable (
 		a VECTOR(float, 3), b VECTOR(float, 3))`))
 	_, err := suite.stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
-	suite.Require().NoError(suite.stmt.SetSqlQuery(`INSERT INTO myvectortable
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `INSERT INTO myvectortable
 		SELECT [1.1,2.2,3]::VECTOR(FLOAT,3), [1,1,1]::VECTOR(FLOAT,3)`))
 	_, err = suite.stmt.ExecuteUpdate(suite.ctx)
 	suite.Require().NoError(err)
@@ -3096,9 +3105,9 @@ func TestInvalidSnowflakeAuthentication(t *testing.T) {
 
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	adbcDriver := driver.NewDriver(mem)
-	db, err := adbcDriver.NewDatabase(opts)
+	db, err := adbcDriver.NewDatabaseWithContext(context.Background(), opts)
 	assert.NoError(t, err)
-	defer validation.CheckedClose(t, db)
+	defer testutil.CheckedCloseWithContext(t, db, context.Background())
 
 	cnxn, err := db.Open(context.Background())
 	assert.Error(t, err)
@@ -3126,4 +3135,160 @@ func TestJwtAuthenticationUnencryptedValueUnauthorized(t *testing.T) {
 	cfg.User = "non_existent_user"
 
 	ConnectWithJwt(t, cfg, keyValue, "", false)
+}
+
+func (suite *SnowflakeTests) TestGetStatisticNames() {
+	statsCnxn, ok := suite.cnxn.(adbc.ConnectionGetStatistics)
+	suite.Require().True(ok, "Snowflake must implement ConnectionGetStatistics")
+
+	rdr, err := statsCnxn.GetStatisticNames(suite.ctx)
+	suite.Require().NoError(err)
+	defer rdr.Release()
+
+	// Verify schema matches ADBC spec
+	suite.True(adbc.GetStatisticNamesSchema.Equal(rdr.Schema()),
+		"expected: %s\ngot: %s", adbc.GetStatisticNamesSchema, rdr.Schema())
+
+	// Verify exactly 6 Snowflake-specific rows
+	suite.True(rdr.Next())
+	rec := rdr.RecordBatch()
+	suite.Equal(int64(6), rec.NumRows())
+}
+
+func (suite *SnowflakeTests) TestGetStatisticsBasic() {
+	// Create a persistent test table (if not exists) to ensure consistent results
+	// across test runs despite INFORMATION_SCHEMA caching
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `
+		CREATE TABLE IF NOT EXISTS statistics_test (
+			id INTEGER,
+			category VARCHAR(50),
+			name VARCHAR(100),
+			value FLOAT
+		) CLUSTER BY (category)
+	`))
+	_, err := suite.stmt.ExecuteUpdate(suite.ctx)
+	suite.Require().NoError(err)
+
+	// Check if table is empty, if so populate it with 400 rows
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `SELECT COUNT(*) FROM statistics_test`))
+	countRdr, _, err := suite.stmt.ExecuteQuery(suite.ctx)
+	suite.Require().NoError(err)
+	suite.Require().True(countRdr.Next())
+	count := countRdr.RecordBatch().Column(0).(*array.Int64).Value(0)
+	countRdr.Release()
+
+	if count == 0 {
+		suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, `
+			INSERT INTO statistics_test
+			SELECT
+				seq4() as id,
+				CASE MOD(seq4(), 3) WHEN 0 THEN 'A' WHEN 1 THEN 'B' ELSE 'C' END as category,
+				'test_' || seq4() as name,
+				UNIFORM(1, 400, RANDOM()) as value
+			FROM TABLE(GENERATOR(ROWCOUNT => 400))
+		`))
+		_, err = suite.stmt.ExecuteUpdate(suite.ctx)
+		suite.Require().NoError(err)
+	}
+
+	// Get the current database and schema
+	var currentDb, currentSchema string
+	suite.Require().NoError(suite.stmt.SetSqlQuery(suite.ctx, "SELECT CURRENT_DATABASE(), CURRENT_SCHEMA()"))
+	rdr, _, err := suite.stmt.ExecuteQuery(suite.ctx)
+	suite.Require().NoError(err)
+	defer rdr.Release()
+
+	suite.Require().True(rdr.Next())
+	rec := rdr.RecordBatch()
+	currentDb = rec.Column(0).(*array.String).Value(0)
+	currentSchema = rec.Column(1).(*array.String).Value(0)
+
+	gs, ok := suite.cnxn.(adbc.ConnectionGetStatistics)
+	if !ok {
+		suite.T().Skip("GetStatistics not supported")
+	}
+
+	// Test Get statistics with specific table filter
+	tableName := "STATISTICS_TEST"
+	statsRdr, err := gs.GetStatistics(suite.ctx, &currentDb, &currentSchema, &tableName, false)
+	suite.Require().NoError(err)
+	defer statsRdr.Release()
+
+	// Verify schema matches ADBC spec
+	suite.True(adbc.GetStatisticsSchema.Equal(statsRdr.Schema()),
+		"Schema should match ADBC spec\nexpected: %s\ngot: %s",
+		adbc.GetStatisticsSchema, statsRdr.Schema())
+
+	// Read and extract statistics for our table
+	var allStats []testutil.Statistic
+	for statsRdr.Next() {
+		rec := statsRdr.RecordBatch()
+		suite.Greater(rec.NumRows(), int64(0), "Should have at least one catalog")
+		stats := testutil.ExtractStatisticsForTable(rec, currentDb, currentSchema, tableName)
+		allStats = append(allStats, stats...)
+	}
+	suite.NoError(statsRdr.Err())
+
+	suite.Greater(len(allStats), 0, "Should find statistics for STATISTICS_TEST table")
+
+	// Convert to lookup map for easier assertions
+	statsMap := testutil.StatisticsToLookupMap(allStats)
+
+	// Row count: We inserted 400 rows (4 batches × 100)
+	rowCount, ok := statsMap[int16(6)].StatisticValue.(float64)
+	suite.True(ok, "row_count statistic should be present as float64")
+	suite.GreaterOrEqual(rowCount, float64(400), "Row count should be non-negative")
+	suite.True(statsMap[int16(6)].IsApproximate, "row_count should be approximate (cached)")
+	suite.T().Logf("Row count: %.0f (note: may be stale due to INFORMATION_SCHEMA caching)", rowCount)
+
+	// Bytes: Should be > 0, reasonable size for 400 rows with data
+	bytes, ok := statsMap[int16(1024)].StatisticValue.(int64)
+	suite.True(ok, "bytes statistic should be present")
+	suite.Greater(bytes, int64(1000), "Bytes should be > 1000 for 400 rows with data")
+	suite.True(statsMap[int16(1024)].IsApproximate, "bytes should be approximate (cached)")
+	suite.T().Logf("Bytes: %d", bytes)
+
+	// Retention time: Default is usually 1 day for new tables
+	retentionTime, ok := statsMap[int16(1025)].StatisticValue.(int64)
+	suite.True(ok, "retention_time statistic should be present")
+	suite.GreaterOrEqual(retentionTime, int64(1), "Retention time should be at least 1 day")
+	suite.True(statsMap[int16(1025)].IsApproximate, "retention_time should be approximate (cached)")
+	suite.T().Logf("Retention time: %d days", retentionTime)
+
+	// Check if clustering depth is present
+	if clusteringDepth, ok := statsMap[int16(1029)].StatisticValue.(float64); ok {
+		suite.T().Logf("Clustering depth found: %.2f", clusteringDepth)
+		// In exact mode, clustering depth should NOT be approximate
+		suite.False(statsMap[int16(1029)].IsApproximate, "clustering_depth should be exact (not approximate) in exact mode")
+		suite.GreaterOrEqual(clusteringDepth, 0.0, "Clustering depth should be non-negative")
+	} else {
+		suite.T().Log("Clustering depth not returned (may require table to be physically clustered)")
+	}
+
+	// Check for storage breakdown statistics (may not be present without ACCOUNTADMIN)
+	hasStorageMetrics := false
+	if activeBytes, ok := statsMap[int16(1026)].StatisticValue.(int64); ok {
+		suite.T().Logf("Active bytes found: %d", activeBytes)
+		suite.GreaterOrEqual(activeBytes, int64(0), "Active bytes should be non-negative")
+		// In exact mode, storage metrics should NOT be approximate
+		suite.False(statsMap[int16(1026)].IsApproximate, "active_bytes should be exact (not approximate) in exact mode")
+		hasStorageMetrics = true
+	}
+	if timeTravelBytes, ok := statsMap[int16(1027)].StatisticValue.(int64); ok {
+		suite.T().Logf("Time Travel bytes found: %d", timeTravelBytes)
+		suite.GreaterOrEqual(timeTravelBytes, int64(0), "Time Travel bytes should be non-negative")
+		suite.False(statsMap[int16(1027)].IsApproximate, "time_travel_bytes should be exact (not approximate) in exact mode")
+	}
+	if failsafeBytes, ok := statsMap[int16(1028)].StatisticValue.(int64); ok {
+		suite.T().Logf("Failsafe bytes found: %d", failsafeBytes)
+		suite.GreaterOrEqual(failsafeBytes, int64(0), "Failsafe bytes should be non-negative")
+		suite.False(statsMap[int16(1028)].IsApproximate, "failsafe_bytes should be exact (not approximate) in exact mode")
+	}
+
+	if !hasStorageMetrics {
+		suite.T().Log("Storage breakdown statistics not returned (requires ACCOUNTADMIN privileges)")
+	}
+
+	// Note: We intentionally don't drop the table to keep it for subsequent test runs,
+	// ensuring consistent results despite INFORMATION_SCHEMA caching
 }
